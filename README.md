@@ -1,23 +1,34 @@
 # Content Reference Toolkit
 
-Local CLI for collecting social-content references into a structured corpus.
+Open-source local pipeline for collecting short-form social references and
+turning them into a structured corpus for later writing-guideline generation.
 
-This is meant to be called from another project, for example `eugeniatel`, when
-you want to analyze examples and turn them into content guidelines.
+Primary use case: astrology content in Spanish for LATAM/Argentina, with
+Instagram Reels, Instagram carousels, and TikTok videos as inputs.
 
-## What It Does
+The toolkit does **not** generate guidelines itself. It prepares clean,
+queryable data that an LLM can read later.
 
-- Collects URL metadata/video through `yt-dlp` when available.
-- Uses `gallery-dl` for image/carousel downloads when available.
-- Accepts local media files/screenshots directly.
-- Extracts audio with `ffmpeg`.
-- Transcribes audio/video with `whisper`.
-- OCRs images with `tesseract`.
-- Writes normalized records to `references/content-reference-corpus.jsonl`.
+## Pipeline
 
-The downloaded media and processed text stay local and are ignored by default.
+```text
+collect -> extract -> normalize -> export
+```
 
-## Install Locally
+Each stage reads/writes disk plus SQLite, so stages can be rerun independently.
+Items are idempotent by source hash unless `--force` is passed.
+
+Output layout:
+
+```text
+references/
+  raw/<slug-hash>/        media, metadata
+  processed/<slug-hash>/  extracted.json, audio, frames, transcripts
+  corpus.sqlite
+  corpus.jsonl
+```
+
+## Install
 
 ```bash
 cd /Users/euge/content-reference-toolkit
@@ -25,46 +36,113 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -e ".[dev]"
 ```
 
-Optional external tools:
+Optional extraction stack:
 
 ```bash
 brew install ffmpeg tesseract
 .venv/bin/python -m pip install yt-dlp gallery-dl openai-whisper
+.venv/bin/python -m pip install ".[extract]"
 ```
 
-## Use From Another Repo
+`faster-whisper`, `easyocr`, and `scenedetect` are optional because they are
+large. The CLI falls back where possible:
+
+- If `faster-whisper` is missing, it tries the `whisper` CLI.
+- If `easyocr` is missing, it tries `tesseract` with English OCR.
+- If `scenedetect` is missing, it samples frames every N seconds.
+
+## Inputs
+
+Inline URLs/files:
+
+```bash
+content-reference collect "https://www.instagram.com/mia_astral/reel/DZ8HloGBd7Q/"
+```
+
+TXT:
+
+```text
+https://www.instagram.com/mia_astral/reel/DZ8HloGBd7Q/
+https://www.tiktok.com/@marenaltman/video/7635083954688724254
+```
+
+CSV:
+
+```csv
+url,format_hint,notes
+https://www.instagram.com/mia_astral/reel/DZ8HloGBd7Q/,reel,astrology coverage
+https://www.instagram.com/lu.gaitan/p/DXwWqZLDg27/,carousel,carousel writing density
+```
+
+## Usage From Another Repo
 
 From `eugeniatel`:
 
 ```bash
 cd /Users/euge/eugeniatel
 /Users/euge/content-reference-toolkit/.venv/bin/content-reference collect \
-  "https://www.instagram.com/mia_astral/reel/DZ8HloGBd7Q/" \
-  --download-media \
-  --transcribe \
-  --use-for astrology_coverage
+  --input references/examples.csv \
+  --output-root references
+
+/Users/euge/content-reference-toolkit/.venv/bin/content-reference extract \
+  --output-root references \
+  --whisper-language es \
+  --ocr-languages es,pt,en
+
+/Users/euge/content-reference-toolkit/.venv/bin/content-reference normalize \
+  --output-root references
+
+/Users/euge/content-reference-toolkit/.venv/bin/content-reference export \
+  --output-root references
+```
+
+All stages at once:
+
+```bash
+/Users/euge/content-reference-toolkit/.venv/bin/content-reference run \
+  --input references/examples.csv \
+  --output-root references \
+  --export
 ```
 
 Local carousel screenshots:
 
 ```bash
-cd /Users/euge/eugeniatel
 /Users/euge/content-reference-toolkit/.venv/bin/content-reference collect \
-  ~/Downloads/carousel-slide-*.png \
-  --ocr \
-  --use-for carousel_density
+  ~/Downloads/carousel-slides/ \
+  --output-root references \
+  --notes "Lu Gaitan carousel reference"
+
+/Users/euge/content-reference-toolkit/.venv/bin/content-reference extract \
+  --output-root references
 ```
 
-Outputs:
+## Data Model
 
-```text
-references/raw/<slug>/
-references/processed/<slug>/record.json
-references/content-reference-corpus.jsonl
-```
+Normalized rows live in SQLite table `pieces` and export to JSONL with:
 
-## Notes
+- source URL and platform
+- format
+- creator and publish date
+- duration and duration bucket
+- caption
+- transcript segments
+- onscreen text sequence
+- slide text sequence
+- spoken/on-screen hooks
+- spoken CTA
+- metrics when available
+- engagement rate when computable
+- operator notes
 
-This tool intentionally does not read browser cookies. If a platform blocks a
-carousel behind login, export screenshots/media manually and run OCR on local
-files instead.
+Failures are recorded in SQLite table `failures`; batch runs continue after
+per-URL errors.
+
+## Auth
+
+The CLI supports a manually supplied `cookies.txt` file via `--cookies`.
+It intentionally does not auto-extract browser session cookies.
+
+## Full Spec
+
+See [docs/spec.md](docs/spec.md).

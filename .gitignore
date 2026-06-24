@@ -9,3 +9,5 @@ __pycache__/
 references/raw/
 references/processed/
 references/content-reference-corpus.jsonl
+references/corpus.sqlite
+references/corpus.jsonl
