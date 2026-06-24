@@ -5,9 +5,6 @@ __pycache__/
 .DS_Store
 *.egg-info/
 
-# Generated corpora/media. Keep these local to the project being analyzed.
-references/raw/
-references/processed/
-references/content-reference-corpus.jsonl
-references/corpus.sqlite
-references/corpus.jsonl
+# Generated corpora/media + run artifacts. Outputs never live in this repo;
+# keep them local to the project being analyzed.
+references/
