@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+*.egg-info/
+
+# Generated corpora/media. Keep these local to the project being analyzed.
+references/raw/
+references/processed/
+references/content-reference-corpus.jsonl
