@@ -92,7 +92,12 @@ For videos:
 - Transcribe with timestamped segments.
 - Detect scene/title-card changes with PySceneDetect. Fallback to fixed sampling.
 - Extract frames with `ffmpeg`.
-- OCR each frame.
+- OCR each frame. With EasyOCR, requested languages (`es,pt,en`) are used
+  directly. With the tesseract fallback, requested languages are mapped to
+  installed tesseract packs (`es->spa`, `pt->por`, `en->eng`) and per-line
+  confidence is read from tesseract TSV output. Install packs with
+  `brew install tesseract-lang`; EasyOCR remains the higher-accuracy path for
+  stylized overlays.
 - Deduplicate near-identical consecutive frame text with rapidfuzz threshold
   around 85.
 - Drop low-confidence OCR rows, default threshold 0.4.
@@ -113,7 +118,13 @@ Derived fields:
 - `hook_onscreen`: first on-screen text card or carousel slide 1.
 - `cta_spoken`: final transcript segment.
 - `duration_bucket`: `short <=30s`, `mid 30-60s`, `long >60s`, or `carousel`.
+- `interaction_count`: sum of available `likes`, `comments`, `shares`. Real
+  counts only, never an estimate. Null when none are present.
 - `engagement_rate`: `(likes + comments + shares) / views` when views exist.
+- `engagement_basis`: `views` when `engagement_rate` is computed, `interactions`
+  when only raw counts exist (e.g. Instagram, which never exposes views via
+  yt-dlp), else null. A later LLM weights by `engagement_rate` when present and
+  falls back to `interaction_count`.
 
 No qualitative interpretation is done here. Hook type, tone, astrology topic,
 and CTA style are left for a later LLM.
@@ -146,7 +157,9 @@ views             INTEGER
 likes             INTEGER
 comments          INTEGER
 shares            INTEGER
+interaction_count INTEGER
 engagement_rate   REAL
+engagement_basis  TEXT
 notes             TEXT
 collected_at      TEXT
 ```

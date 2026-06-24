@@ -222,7 +222,9 @@ def init_db(con: sqlite3.Connection) -> None:
             likes INTEGER,
             comments INTEGER,
             shares INTEGER,
+            interaction_count INTEGER,
             engagement_rate REAL,
+            engagement_basis TEXT,
             notes TEXT,
             collected_at TEXT
         );
@@ -237,6 +239,11 @@ def init_db(con: sqlite3.Connection) -> None:
         );
         """
     )
+    # Migrate pre-existing pieces tables that lack the newer metric columns.
+    existing = {row["name"] for row in con.execute("PRAGMA table_info(pieces)")}
+    for column, decl in (("interaction_count", "INTEGER"), ("engagement_basis", "TEXT")):
+        if column not in existing:
+            con.execute(f"ALTER TABLE pieces ADD COLUMN {column} {decl}")
     con.commit()
 
 
@@ -570,22 +577,77 @@ def easyocr_image(image: Path, *, languages: list[str], min_confidence: float) -
     return [row for row in rows if parse_float(row.get("confidence")) is not None and float(row["confidence"]) >= min_confidence], ""
 
 
-def tesseract_image(image: Path) -> tuple[list[dict[str, Any]], str]:
+# ISO 639-1 (and a few common aliases) to tesseract's 639-2/T language codes.
+TESSERACT_LANG_MAP = {
+    "es": "spa", "spa": "spa",
+    "pt": "por", "por": "por",
+    "en": "eng", "eng": "eng",
+    "fr": "fra", "fra": "fra",
+    "it": "ita", "ita": "ita",
+    "de": "deu", "deu": "deu",
+}
+
+
+def tesseract_languages(languages: list[str]) -> str:
+    """Map requested languages to installed tesseract packs, falling back to eng."""
+    exe = tool("tesseract")
+    available: set[str] = set()
+    if exe:
+        proc = run([exe, "--list-langs"], timeout=30)
+        if proc.returncode == 0:
+            available = {line.strip() for line in proc.stdout.splitlines()[1:] if line.strip()}
+    codes: list[str] = []
+    for lang in languages:
+        code = TESSERACT_LANG_MAP.get(lang.strip().lower(), lang.strip().lower())
+        if code and code not in codes and (not available or code in available):
+            codes.append(code)
+    if not codes:
+        codes = ["eng"]
+    return "+".join(codes)
+
+
+def tesseract_image(image: Path, *, languages: list[str], min_confidence: float) -> tuple[list[dict[str, Any]], str]:
     exe = tool("tesseract")
     if not exe:
         return [], "easyocr and tesseract not found"
-    proc = run([exe, str(image), "stdout", "-l", "eng"], timeout=120)
+    langs = tesseract_languages(languages)
+    proc = run([exe, str(image), "stdout", "-l", langs, "tsv"], timeout=120)
     if proc.returncode != 0:
         return [], proc.stderr.strip()
-    text = proc.stdout.strip()
-    return ([{"text": text, "confidence": 1.0}] if text else []), ""
+    # TSV columns: level page block par line word left top width height conf text
+    lines: dict[tuple[str, str, str], dict[str, list[Any]]] = {}
+    order: list[tuple[str, str, str]] = []
+    for raw in proc.stdout.splitlines()[1:]:
+        cols = raw.split("\t")
+        if len(cols) < 12:
+            continue
+        text = cols[11].strip()
+        conf = parse_float(cols[10])
+        if not text or conf is None or conf < 0:
+            continue
+        key = (cols[2], cols[3], cols[4])
+        if key not in lines:
+            lines[key] = {"words": [], "confs": []}
+            order.append(key)
+        lines[key]["words"].append(text)
+        lines[key]["confs"].append(conf / 100.0)
+    rows: list[dict[str, Any]] = []
+    for key in order:
+        bucket = lines[key]
+        if not bucket["words"]:
+            continue
+        line_conf = sum(bucket["confs"]) / len(bucket["confs"])
+        if line_conf < min_confidence:
+            continue
+        rows.append({"text": " ".join(bucket["words"]), "confidence": round(line_conf, 3)})
+    return rows, ""
 
 
 def ocr_image(image: Path, *, languages: list[str], min_confidence: float) -> tuple[list[dict[str, Any]], str]:
     try:
         import easyocr  # noqa: F401
     except ImportError:
-        return tesseract_image(image)
+        return tesseract_image(image, languages=languages, min_confidence=min_confidence)
     return easyocr_image(image, languages=languages, min_confidence=min_confidence)
 
 
@@ -759,19 +821,27 @@ def normalize_source(con: sqlite3.Connection, *, output_root: Path, row: sqlite3
     likes = parse_int(metadata_value(metadata, "like_count"))
     comments = parse_int(metadata_value(metadata, "comment_count"))
     shares = parse_int(metadata_value(metadata, "repost_count", "share_count"))
+    present_interactions = [v for v in (likes, comments, shares) if v is not None]
+    interaction_count = sum(present_interactions) if present_interactions else None
     engagement_rate = None
+    engagement_basis = None
     if views:
-        engagement_rate = ((likes or 0) + (comments or 0) + (shares or 0)) / views
+        engagement_rate = (interaction_count or 0) / views
+        engagement_basis = "views"
+    elif interaction_count is not None:
+        # Platforms like Instagram never expose views via yt-dlp. Record the raw
+        # interaction total as the ranking signal instead of estimating views.
+        engagement_basis = "interactions"
 
     con.execute(
         """
         INSERT INTO pieces(
             id, source_url, platform, format, creator, published_at, duration_sec,
             duration_bucket, caption, transcript, onscreen_text, slides, hook_spoken,
-            hook_onscreen, cta_spoken, views, likes, comments, shares, engagement_rate,
-            notes, collected_at
+            hook_onscreen, cta_spoken, views, likes, comments, shares, interaction_count,
+            engagement_rate, engagement_basis, notes, collected_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             source_url=excluded.source_url,
             platform=excluded.platform,
@@ -791,7 +861,9 @@ def normalize_source(con: sqlite3.Connection, *, output_root: Path, row: sqlite3
             likes=excluded.likes,
             comments=excluded.comments,
             shares=excluded.shares,
+            interaction_count=excluded.interaction_count,
             engagement_rate=excluded.engagement_rate,
+            engagement_basis=excluded.engagement_basis,
             notes=excluded.notes,
             collected_at=excluded.collected_at
         """,
@@ -815,7 +887,9 @@ def normalize_source(con: sqlite3.Connection, *, output_root: Path, row: sqlite3
             likes,
             comments,
             shares,
+            interaction_count,
             engagement_rate,
+            engagement_basis,
             row["notes"],
             row["collected_at"] or utc_now(),
         ),

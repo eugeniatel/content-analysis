@@ -48,7 +48,10 @@ brew install ffmpeg tesseract
 large. The CLI falls back where possible:
 
 - If `faster-whisper` is missing, it tries the `whisper` CLI.
-- If `easyocr` is missing, it tries `tesseract` with English OCR.
+- If `easyocr` is missing, it tries `tesseract`, mapping the requested OCR
+  languages to installed tesseract packs (`es->spa`, `pt->por`, `en->eng`).
+  Install the packs with `brew install tesseract-lang`. EasyOCR is still the
+  more accurate engine for stylized social overlays.
 - If `scenedetect` is missing, it samples frames every N seconds.
 
 ## Inputs
@@ -132,7 +135,9 @@ Normalized rows live in SQLite table `pieces` and export to JSONL with:
 - spoken/on-screen hooks
 - spoken CTA
 - metrics when available
-- engagement rate when computable
+- interaction count (raw likes + comments + shares) as a ranking signal when
+  views are unavailable
+- engagement rate when computable, plus the basis (`views` or `interactions`)
 - operator notes
 
 Failures are recorded in SQLite table `failures`; batch runs continue after

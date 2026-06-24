@@ -42,3 +42,21 @@ def test_published_at_from_metadata_normalizes_dates():
     assert cli.published_at_from_metadata({"upload_date": "20260624"}) == "2026-06-24"
     assert cli.published_at_from_metadata({"timestamp": 1782322700}) == "2026-06-24"
     assert cli.published_at_from_metadata({}) is None
+
+
+def test_tesseract_languages_maps_iso_codes(monkeypatch):
+    monkeypatch.setattr(cli, "tool", lambda name: None)  # no tesseract -> skip pack check
+    assert cli.tesseract_languages(["es", "pt", "en"]) == "spa+por+eng"
+    assert cli.tesseract_languages(["es", "es"]) == "spa"
+    assert cli.tesseract_languages([]) == "eng"
+
+
+def test_tesseract_languages_filters_to_installed_packs(monkeypatch):
+    class FakeProc:
+        returncode = 0
+        stdout = "List of available languages:\neng\nspa\n"
+
+    monkeypatch.setattr(cli, "tool", lambda name: "/usr/bin/tesseract")
+    monkeypatch.setattr(cli, "run", lambda *a, **k: FakeProc())
+    # por is requested but not installed, so it is dropped.
+    assert cli.tesseract_languages(["es", "pt", "en"]) == "spa+eng"
