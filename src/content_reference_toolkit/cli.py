@@ -326,6 +326,16 @@ def yt_dlp_download(source: str, outdir: Path, cookies_file: Path | None) -> tup
         "--no-warnings",
         "--write-info-json",
         "--write-thumbnail",
+        # Force a format that includes a usable audio track. Some platforms
+        # (TikTok) serve an HEVC/h265 muxed stream as "best" whose audio is
+        # dropped on download, leaving the transcript empty. Preferring h264
+        # picks the muxed variant that actually carries aac audio.
+        "-f",
+        "bv*+ba/b",
+        "-S",
+        "vcodec:h264",
+        "--merge-output-format",
+        "mp4",
         "-o",
         str(outdir / "%(id)s.%(ext)s"),
     ]
