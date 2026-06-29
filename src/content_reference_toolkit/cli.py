@@ -20,6 +20,20 @@ VIDEO_EXTENSIONS = {".mp4", ".mov"}
 AUDIO_EXTENSIONS = {".m4a", ".mp3", ".wav"}
 MEDIA_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS | AUDIO_EXTENSIONS
 DEFAULT_OUTPUT_ROOT = Path("references")
+METRIC_COLUMNS = {
+    "views", "impressions", "reach", "plays",
+    "likes", "reactions", "comments", "replies", "shares", "reposts",
+    "saves", "bookmarks", "clicks", "profile_clicks",
+    "avg_watch_time", "watched_full_video_pct", "completion_rate",
+    "retention_rate", "engagement_rate",
+}
+PRIMARY_METRIC_BY_PLATFORM = {
+    "x": ("comments", ("comments", "replies")),
+    "twitter": ("comments", ("comments", "replies")),
+    "linkedin": ("engagement_rate", ("engagement_rate",)),
+    "tiktok": ("completion_rate", ("completion_rate", "watched_full_video_pct")),
+    "instagram": ("retention_rate", ("retention_rate",)),
+}
 
 
 def utc_now() -> str:
@@ -103,6 +117,10 @@ def parse_int(value: Any) -> int | None:
 def parse_float(value: Any) -> float | None:
     if value is None:
         return None
+    if isinstance(value, str):
+        value = value.strip().replace("%", "")
+        if not value:
+            return None
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -149,6 +167,16 @@ def platform_for_source(source: str) -> str:
         return "instagram"
     if "tiktok.com" in host:
         return "tiktok"
+    if "x.com" in host or "twitter.com" in host:
+        return "x"
+    if "linkedin.com" in host:
+        return "linkedin"
+    if "youtube.com" in host or "youtu.be" in host:
+        return "youtube"
+    if "threads.net" in host:
+        return "threads"
+    if "facebook.com" in host or "fb.watch" in host:
+        return "facebook"
     return "local" if not is_url(source) else "unknown"
 
 
@@ -159,6 +187,16 @@ def infer_format(source: str, format_hint: str | None, media: Iterable[Path] = (
         parsed = urlparse(source)
         if "tiktok.com" in parsed.netloc:
             return "tiktok"
+        if "youtube.com" in parsed.netloc and "/shorts/" in parsed.path:
+            return "short"
+        if "x.com" in parsed.netloc or "twitter.com" in parsed.netloc:
+            return "post"
+        if "linkedin.com" in parsed.netloc:
+            return "post"
+        if "threads.net" in parsed.netloc:
+            return "post"
+        if "facebook.com" in parsed.netloc or "fb.watch" in parsed.netloc:
+            return "post"
         if "/reel/" in parsed.path:
             return "reel"
         if "/p/" in parsed.path:
@@ -225,6 +263,13 @@ def init_db(con: sqlite3.Connection) -> None:
             interaction_count INTEGER,
             engagement_rate REAL,
             engagement_basis TEXT,
+            primary_metric_name TEXT,
+            primary_metric_value REAL,
+            primary_metric_basis TEXT,
+            secondary_metrics TEXT,
+            metric_source TEXT,
+            metric_confidence TEXT,
+            metrics_captured_at TEXT,
             notes TEXT,
             collected_at TEXT
         );
@@ -241,7 +286,17 @@ def init_db(con: sqlite3.Connection) -> None:
     )
     # Migrate pre-existing pieces tables that lack the newer metric columns.
     existing = {row["name"] for row in con.execute("PRAGMA table_info(pieces)")}
-    for column, decl in (("interaction_count", "INTEGER"), ("engagement_basis", "TEXT")):
+    for column, decl in (
+        ("interaction_count", "INTEGER"),
+        ("engagement_basis", "TEXT"),
+        ("primary_metric_name", "TEXT"),
+        ("primary_metric_value", "REAL"),
+        ("primary_metric_basis", "TEXT"),
+        ("secondary_metrics", "TEXT"),
+        ("metric_source", "TEXT"),
+        ("metric_confidence", "TEXT"),
+        ("metrics_captured_at", "TEXT"),
+    ):
         if column not in existing:
             con.execute(f"ALTER TABLE pieces ADD COLUMN {column} {decl}")
     con.commit()
@@ -805,6 +860,84 @@ def metadata_value(metadata: dict[str, Any] | None, *keys: str) -> Any:
     return None
 
 
+def normalize_metric_rate(value: float | None) -> float | None:
+    if value is None:
+        return None
+    # User-facing exports often use either 7.5 or 0.075 for 7.5%.
+    return value / 100 if value > 1 else value
+
+
+def numeric_metrics(values: dict[str, Any]) -> dict[str, float]:
+    metrics: dict[str, float] = {}
+    for key in METRIC_COLUMNS:
+        value = parse_float(values.get(key))
+        if value is None:
+            continue
+        if key in {"engagement_rate", "completion_rate", "retention_rate", "watched_full_video_pct"}:
+            value = normalize_metric_rate(value) or value
+        metrics[key] = value
+    return metrics
+
+
+def derive_metric_summary(
+    *,
+    platform: str | None,
+    metrics: dict[str, float],
+    interaction_count: int | None,
+    engagement_rate: float | None,
+    engagement_basis: str | None,
+    explicit_primary_name: str | None = None,
+    explicit_primary_value: float | None = None,
+    metric_source: str | None = None,
+) -> dict[str, Any]:
+    platform_key = (platform or "").lower()
+    if engagement_rate is not None and "engagement_rate" not in metrics:
+        metrics["engagement_rate"] = engagement_rate
+    if interaction_count is not None and "interaction_count" not in metrics:
+        metrics["interaction_count"] = float(interaction_count)
+
+    primary_name = explicit_primary_name or None
+    primary_value = explicit_primary_value
+    primary_basis = None
+    confidence = "partial"
+
+    if primary_name and primary_value is not None:
+        primary_basis = "explicit"
+        confidence = "native"
+    else:
+        desired = PRIMARY_METRIC_BY_PLATFORM.get(platform_key)
+        if desired:
+            primary_name = desired[0]
+            for candidate in desired[1]:
+                if candidate in metrics:
+                    primary_value = metrics[candidate]
+                    primary_basis = candidate
+                    confidence = "native"
+                    break
+
+    if primary_value is None:
+        if engagement_rate is not None:
+            primary_name = primary_name or "engagement_rate"
+            primary_value = engagement_rate
+            primary_basis = engagement_basis or "derived"
+            confidence = "derived"
+        elif interaction_count is not None:
+            primary_name = primary_name or "interaction_count"
+            primary_value = float(interaction_count)
+            primary_basis = "interactions"
+            confidence = "derived"
+
+    secondary = {key: value for key, value in sorted(metrics.items()) if key != primary_basis}
+    return {
+        "primary_metric_name": primary_name,
+        "primary_metric_value": primary_value,
+        "primary_metric_basis": primary_basis,
+        "secondary_metrics": secondary or None,
+        "metric_source": metric_source,
+        "metric_confidence": confidence if primary_value is not None else None,
+    }
+
+
 def normalize_source(con: sqlite3.Connection, *, output_root: Path, row: sqlite3.Row, force: bool) -> dict[str, Any]:
     id_ = row["id"]
     source = row["source_url"]
@@ -842,6 +975,20 @@ def normalize_source(con: sqlite3.Connection, *, output_root: Path, row: sqlite3
         # Platforms like Instagram never expose views via yt-dlp. Record the raw
         # interaction total as the ranking signal instead of estimating views.
         engagement_basis = "interactions"
+    metric_summary = derive_metric_summary(
+        platform=row["platform"],
+        metrics=numeric_metrics({
+            "views": views,
+            "likes": likes,
+            "comments": comments,
+            "shares": shares,
+            "engagement_rate": engagement_rate,
+        }),
+        interaction_count=interaction_count,
+        engagement_rate=engagement_rate,
+        engagement_basis=engagement_basis,
+        metric_source="metadata" if any(v is not None for v in (views, likes, comments, shares)) else None,
+    )
 
     con.execute(
         """
@@ -849,9 +996,11 @@ def normalize_source(con: sqlite3.Connection, *, output_root: Path, row: sqlite3
             id, source_url, platform, format, creator, published_at, duration_sec,
             duration_bucket, caption, transcript, onscreen_text, slides, hook_spoken,
             hook_onscreen, cta_spoken, views, likes, comments, shares, interaction_count,
-            engagement_rate, engagement_basis, notes, collected_at
+            engagement_rate, engagement_basis, primary_metric_name, primary_metric_value,
+            primary_metric_basis, secondary_metrics, metric_source, metric_confidence,
+            metrics_captured_at, notes, collected_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             source_url=excluded.source_url,
             platform=excluded.platform,
@@ -874,6 +1023,13 @@ def normalize_source(con: sqlite3.Connection, *, output_root: Path, row: sqlite3
             interaction_count=excluded.interaction_count,
             engagement_rate=excluded.engagement_rate,
             engagement_basis=excluded.engagement_basis,
+            primary_metric_name=excluded.primary_metric_name,
+            primary_metric_value=excluded.primary_metric_value,
+            primary_metric_basis=excluded.primary_metric_basis,
+            secondary_metrics=excluded.secondary_metrics,
+            metric_source=excluded.metric_source,
+            metric_confidence=excluded.metric_confidence,
+            metrics_captured_at=excluded.metrics_captured_at,
             notes=excluded.notes,
             collected_at=excluded.collected_at
         """,
@@ -900,6 +1056,13 @@ def normalize_source(con: sqlite3.Connection, *, output_root: Path, row: sqlite3
             interaction_count,
             engagement_rate,
             engagement_basis,
+            metric_summary["primary_metric_name"],
+            metric_summary["primary_metric_value"],
+            metric_summary["primary_metric_basis"],
+            json_dumps(metric_summary["secondary_metrics"]) if metric_summary["secondary_metrics"] else None,
+            metric_summary["metric_source"],
+            metric_summary["metric_confidence"],
+            utc_now() if metric_summary["metric_source"] else None,
             row["notes"],
             row["collected_at"] or utc_now(),
         ),
@@ -911,7 +1074,7 @@ def normalize_source(con: sqlite3.Connection, *, output_root: Path, row: sqlite3
 
 def piece_to_json(row: sqlite3.Row) -> dict[str, Any]:
     out = dict(row)
-    for key in ("transcript", "onscreen_text", "slides"):
+    for key in ("transcript", "onscreen_text", "slides", "secondary_metrics"):
         out[key] = json_loads(out.get(key))
     return out
 
@@ -924,6 +1087,165 @@ def export_jsonl(con: sqlite3.Connection, output_root: Path, out: Path | None) -
         for row in rows:
             fh.write(json.dumps(piece_to_json(row), ensure_ascii=False, sort_keys=True) + "\n")
     return len(rows)
+
+
+def first_present(row: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = row.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def read_metric_rows(path: Path) -> list[dict[str, str]]:
+    with path.open(newline="", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        rows = []
+        for row in reader:
+            source = (first_present(row, "source_url", "url") or "").strip()
+            if source:
+                rows.append({key: (value or "").strip() for key, value in row.items() if key})
+        return rows
+
+
+def import_metric_row(con: sqlite3.Connection, *, output_root: Path, row: dict[str, str]) -> dict[str, Any]:
+    source = first_present(row, "source_url", "url")
+    if not source:
+        return {"status": "skipped", "error": "missing source_url/url"}
+
+    id_ = source_id(source)
+    platform = (first_present(row, "platform") or platform_for_source(source)).lower()
+    format_ = first_present(row, "format", "format_hint") or infer_format(source, None)
+    collected_at = first_present(row, "collected_at") or utc_now()
+    captured_at = first_present(row, "metrics_captured_at", "captured_at") or collected_at
+    metric_source = first_present(row, "metric_source") or "manual_csv"
+
+    likes = parse_int(first_present(row, "likes", "reactions"))
+    comments = parse_int(first_present(row, "comments", "replies"))
+    shares = parse_int(first_present(row, "shares", "reposts"))
+    views = parse_int(first_present(row, "views", "plays"))
+    metrics = numeric_metrics(row)
+    present_interactions = [v for v in (likes, comments, shares) if v is not None]
+    interaction_count = sum(present_interactions) if present_interactions else None
+    explicit_engagement_rate = normalize_metric_rate(parse_float(first_present(row, "engagement_rate")))
+    engagement_rate = explicit_engagement_rate
+    engagement_basis = "explicit" if explicit_engagement_rate is not None else None
+    denominator = parse_float(first_present(row, "views", "impressions", "reach", "plays"))
+    if engagement_rate is None and denominator:
+        engagement_rate = (interaction_count or 0) / denominator
+        engagement_basis = "derived"
+    elif engagement_rate is None and interaction_count is not None:
+        engagement_basis = "interactions"
+
+    primary_value = normalize_metric_rate(parse_float(first_present(row, "primary_metric_value")))
+    metric_summary = derive_metric_summary(
+        platform=platform,
+        metrics=metrics,
+        interaction_count=interaction_count,
+        engagement_rate=engagement_rate,
+        engagement_basis=engagement_basis,
+        explicit_primary_name=first_present(row, "primary_metric_name"),
+        explicit_primary_value=primary_value,
+        metric_source=metric_source,
+    )
+
+    raw_dir = output_root / "raw" / source_dir_name(source)
+    processed_dir = output_root / "processed" / source_dir_name(source)
+    con.execute(
+        """
+        INSERT INTO sources(
+            id, source_url, platform, format_hint, notes, status_collect, status_extract,
+            status_normalize, raw_dir, processed_dir, metadata_json, media_json, collected_at
+        )
+        VALUES (?, ?, ?, ?, ?, 'manual_metrics', NULL, 'done', ?, ?, NULL, '[]', ?)
+        ON CONFLICT(id) DO UPDATE SET
+            platform=excluded.platform,
+            format_hint=excluded.format_hint,
+            notes=excluded.notes,
+            status_normalize='done',
+            collected_at=excluded.collected_at
+        """,
+        (
+            id_,
+            source,
+            platform,
+            format_,
+            first_present(row, "notes") or "",
+            rel(raw_dir, output_root),
+            rel(processed_dir, output_root),
+            collected_at,
+        ),
+    )
+    con.execute(
+        """
+        INSERT INTO pieces(
+            id, source_url, platform, format, creator, published_at, duration_sec,
+            duration_bucket, caption, transcript, onscreen_text, slides, hook_spoken,
+            hook_onscreen, cta_spoken, views, likes, comments, shares, interaction_count,
+            engagement_rate, engagement_basis, primary_metric_name, primary_metric_value,
+            primary_metric_basis, secondary_metrics, metric_source, metric_confidence,
+            metrics_captured_at, notes, collected_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            platform=excluded.platform,
+            format=excluded.format,
+            creator=COALESCE(excluded.creator, pieces.creator),
+            published_at=COALESCE(excluded.published_at, pieces.published_at),
+            caption=COALESCE(excluded.caption, pieces.caption),
+            views=excluded.views,
+            likes=excluded.likes,
+            comments=excluded.comments,
+            shares=excluded.shares,
+            interaction_count=excluded.interaction_count,
+            engagement_rate=excluded.engagement_rate,
+            engagement_basis=excluded.engagement_basis,
+            primary_metric_name=excluded.primary_metric_name,
+            primary_metric_value=excluded.primary_metric_value,
+            primary_metric_basis=excluded.primary_metric_basis,
+            secondary_metrics=excluded.secondary_metrics,
+            metric_source=excluded.metric_source,
+            metric_confidence=excluded.metric_confidence,
+            metrics_captured_at=excluded.metrics_captured_at,
+            notes=COALESCE(NULLIF(excluded.notes, ''), pieces.notes),
+            collected_at=excluded.collected_at
+        """,
+        (
+            id_,
+            source,
+            platform,
+            format_,
+            first_present(row, "creator", "author", "handle"),
+            first_present(row, "published_at", "date"),
+            parse_float(first_present(row, "duration_sec", "duration")),
+            duration_bucket(format_, parse_float(first_present(row, "duration_sec", "duration"))),
+            first_present(row, "caption", "text"),
+            views,
+            likes,
+            comments,
+            shares,
+            interaction_count,
+            engagement_rate,
+            engagement_basis,
+            metric_summary["primary_metric_name"],
+            metric_summary["primary_metric_value"],
+            metric_summary["primary_metric_basis"],
+            json_dumps(metric_summary["secondary_metrics"]) if metric_summary["secondary_metrics"] else None,
+            metric_summary["metric_source"],
+            metric_summary["metric_confidence"],
+            captured_at,
+            first_present(row, "notes") or "",
+            collected_at,
+        ),
+    )
+    con.commit()
+    return {
+        "id": id_,
+        "source": source,
+        "platform": platform,
+        "status": "done",
+        "primary_metric": metric_summary["primary_metric_name"],
+    }
 
 
 def selected_sources(con: sqlite3.Connection, ids: list[str] | None = None) -> list[sqlite3.Row]:
@@ -997,6 +1319,20 @@ def cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_import_metrics(args: argparse.Namespace) -> int:
+    output_root = args.output_root.resolve()
+    con = connect(output_root)
+    count = 0
+    for input_path in args.input:
+        for row in read_metric_rows(input_path):
+            result = import_metric_row(con, output_root=output_root, row=row)
+            print_summary(result)
+            if result.get("status") == "done":
+                count += 1
+    print_summary({"status": "done", "rows": count})
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     collect_args = argparse.Namespace(**vars(args))
     cmd_collect(collect_args)
@@ -1059,6 +1395,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     add_common(export)
     export.add_argument("--output", type=Path)
     export.set_defaults(func=cmd_export)
+
+    import_metrics = sub.add_parser("import-metrics", help="Import manual platform metrics from CSV.")
+    add_common(import_metrics)
+    import_metrics.add_argument("--input", type=Path, action="append", required=True, help="CSV with source_url/url plus metric columns.")
+    import_metrics.set_defaults(func=cmd_import_metrics)
 
     run_all = sub.add_parser("run", help="Run collect -> extract -> normalize, optionally export.")
     add_common(run_all)

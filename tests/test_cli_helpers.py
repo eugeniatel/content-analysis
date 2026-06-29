@@ -22,8 +22,20 @@ def test_detect_format_uses_url_and_media():
     assert cli.infer_format("https://www.instagram.com/x/reel/abc/", None, []) == "reel"
     assert cli.infer_format("https://www.instagram.com/x/p/abc/", None, []) == "carousel"
     assert cli.infer_format("https://www.tiktok.com/@x/video/1", None, []) == "tiktok"
+    assert cli.infer_format("https://x.com/euge/status/1", None, []) == "post"
+    assert cli.infer_format("https://www.linkedin.com/feed/update/urn:li:activity:1/", None, []) == "post"
+    assert cli.infer_format("https://www.youtube.com/shorts/abc", None, []) == "short"
     assert cli.infer_format("/tmp/a.mp4", None, [Path("/tmp/a.mp4")]) == "reel"
     assert cli.infer_format("/tmp/a.png", None, [Path("/tmp/a.png")]) == "carousel"
+
+
+def test_platform_for_source_detects_planned_platforms():
+    assert cli.platform_for_source("https://x.com/euge/status/1") == "x"
+    assert cli.platform_for_source("https://twitter.com/euge/status/1") == "x"
+    assert cli.platform_for_source("https://www.linkedin.com/feed/update/1") == "linkedin"
+    assert cli.platform_for_source("https://www.youtube.com/shorts/abc") == "youtube"
+    assert cli.platform_for_source("https://www.threads.net/@x/post/1") == "threads"
+    assert cli.platform_for_source("https://www.facebook.com/reel/1") == "facebook"
 
 
 def test_duration_bucket():
@@ -60,3 +72,49 @@ def test_tesseract_languages_filters_to_installed_packs(monkeypatch):
     monkeypatch.setattr(cli, "run", lambda *a, **k: FakeProc())
     # por is requested but not installed, so it is dropped.
     assert cli.tesseract_languages(["es", "pt", "en"]) == "spa+eng"
+
+
+def test_derive_metric_summary_prefers_platform_primary_metric():
+    summary = cli.derive_metric_summary(
+        platform="tiktok",
+        metrics={"completion_rate": 0.72, "comments": 12},
+        interaction_count=44,
+        engagement_rate=0.03,
+        engagement_basis="views",
+        metric_source="manual_csv",
+    )
+
+    assert summary["primary_metric_name"] == "completion_rate"
+    assert summary["primary_metric_value"] == 0.72
+    assert summary["primary_metric_basis"] == "completion_rate"
+    assert summary["metric_confidence"] == "native"
+
+
+def test_import_metrics_creates_piece_with_linkedin_engagement_rate(tmp_path):
+    output_root = tmp_path / "references"
+    con = cli.connect(output_root)
+
+    result = cli.import_metric_row(
+        con,
+        output_root=output_root,
+        row={
+            "url": "https://www.linkedin.com/feed/update/urn:li:activity:123/",
+            "impressions": "1000",
+            "reactions": "40",
+            "comments": "10",
+            "reposts": "5",
+            "engagement_rate": "5.5%",
+            "creator": "Euge",
+        },
+    )
+
+    assert result["status"] == "done"
+    row = con.execute("SELECT * FROM pieces").fetchone()
+    assert row["platform"] == "linkedin"
+    assert row["likes"] == 40
+    assert row["comments"] == 10
+    assert row["shares"] == 5
+    assert row["interaction_count"] == 55
+    assert row["primary_metric_name"] == "engagement_rate"
+    assert row["primary_metric_value"] == 0.055
+    assert row["metric_source"] == "manual_csv"

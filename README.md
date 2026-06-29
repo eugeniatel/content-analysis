@@ -9,6 +9,62 @@ Instagram Reels, Instagram carousels, and TikTok videos as inputs.
 The toolkit does **not** generate guidelines itself. It prepares clean,
 queryable data that an LLM can read later.
 
+## What Is Statool?
+
+Statool is the working product direction for this repository: a local,
+cross-platform social content analysis tool. Today it is implemented as the
+`content-reference` CLI, focused on collecting content references and turning
+them into a clean corpus for later analysis. As the project expands, this README
+should be updated to reflect the current platform coverage, metrics, and
+analysis features.
+
+## Platform Coverage
+
+| Plataforma | Formatos | Estado |
+| --- | --- | --- |
+| Instagram | Reels, carousels | Cubierto |
+| TikTok | Videos | Cubierto |
+| Local files | Videos, audios, imagenes | Cubierto como fallback/manual |
+| X/Twitter | Posts, threads, videos | No cubierto |
+| LinkedIn | Posts, carousels/docs, video | No cubierto |
+| YouTube Shorts | Shorts/video | No explicito |
+| Facebook/Threads | Posts/video | No cubierto |
+
+## Platform Metric Priorities
+
+Statool tracks generic metrics when they are available, but each platform should
+also have a primary metric that reflects what the platform tends to reward.
+
+| Plataforma | Metrica principal | Estado |
+| --- | --- | --- |
+| X/Twitter | comments/replies | Modelado; import manual CSV |
+| LinkedIn | engagement rate % | Modelado; import manual CSV |
+| TikTok | completion rate % | Modelado; import manual CSV |
+| Instagram | retention rate + shares | Modelado; import manual CSV |
+
+## Current Capabilities
+
+- Descarga media y metadata con `yt-dlp` y `gallery-dl`.
+- Acepta URLs, TXT, CSV y archivos locales.
+- Importa CSVs manuales de metricas para plataformas todavia no cubiertas por
+  descarga automatica.
+- Extrae audio con `ffmpeg`.
+- Transcribe videos con `faster-whisper` o Whisper CLI.
+- Extrae texto en pantalla con EasyOCR o Tesseract.
+- Detecta frames por escenas o intervalos.
+- Hace OCR de slides de carousels.
+- Normaliza a SQLite y JSONL.
+- Guarda caption, creator, fecha, duracion, transcript, texto en pantalla,
+  texto de slides, hook hablado, hook visual y CTA hablado.
+- Registra metricas si vienen en metadata: `views`, `likes`, `comments`,
+  `shares`.
+- Calcula `interaction_count = likes + comments + shares`.
+- Calcula `engagement_rate = interactions / views` cuando hay views.
+- Guarda `primary_metric_name`, `primary_metric_value`,
+  `primary_metric_basis`, `secondary_metrics`, `metric_source`,
+  `metric_confidence` y `metrics_captured_at`.
+- Registra fallas por URL sin cortar todo el batch.
+
 ## Pipeline
 
 ```text
@@ -120,6 +176,19 @@ Local carousel screenshots:
   --output-root references
 ```
 
+Manual platform metrics:
+
+```csv
+url,platform,impressions,reactions,comments,reposts,engagement_rate
+https://www.linkedin.com/feed/update/urn:li:activity:123/,linkedin,1000,40,10,5,5.5%
+```
+
+```bash
+content-reference import-metrics \
+  --input references/manual-metrics.csv \
+  --output-root references
+```
+
 ## Data Model
 
 Normalized rows live in SQLite table `pieces` and export to JSONL with:
@@ -138,6 +207,8 @@ Normalized rows live in SQLite table `pieces` and export to JSONL with:
 - interaction count (raw likes + comments + shares) as a ranking signal when
   views are unavailable
 - engagement rate when computable, plus the basis (`views` or `interactions`)
+- primary platform metric and secondary metrics when imported or computable
+- metric source, confidence, and capture timestamp
 - operator notes
 
 Failures are recorded in SQLite table `failures`; batch runs continue after

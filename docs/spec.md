@@ -16,6 +16,7 @@ for extraction.
 In scope:
 
 - Download video, carousel images, captions, and available metrics.
+- Import manually exported platform metrics from CSV.
 - Transcribe spoken audio.
 - Extract on-screen video text: overlays, title cards, burned-in subtitles.
 - Extract text from each carousel slide.
@@ -35,6 +36,20 @@ TXT or CSV. CSV columns:
 - `notes`: operator note explaining why the example was selected.
 
 Local media paths are also valid for manually exported screenshots/videos.
+
+Manual metric CSVs are also valid through `import-metrics`. Supported columns
+include:
+
+- `url` or `source_url`, required.
+- `platform`, optional when the URL is recognizable.
+- `format` or `format_hint`, optional.
+- `views`, `impressions`, `reach`, `plays`.
+- `likes`, `reactions`, `comments`, `replies`, `shares`, `reposts`.
+- `saves`, `bookmarks`, `clicks`, `profile_clicks`.
+- `avg_watch_time`, `watched_full_video_pct`, `completion_rate`,
+  `retention_rate`, `engagement_rate`.
+- `primary_metric_name`, `primary_metric_value` for explicit overrides.
+- `metric_source`, `metrics_captured_at`, `notes`.
 
 ## 4. OSS Stack
 
@@ -133,6 +148,25 @@ and CTA style are left for a later LLM.
 
 Export `pieces` to `corpus.jsonl`, one object per line.
 
+## 9.1 Manual Metrics Import
+
+`import-metrics` writes or updates `pieces` rows directly from platform exports.
+This allows Statool to track X/Twitter, LinkedIn, TikTok, Instagram, YouTube, or
+other platform performance before full media collection exists for each
+platform.
+
+Primary platform metric defaults:
+
+```text
+X/Twitter       comments/replies
+LinkedIn        engagement_rate
+TikTok          completion_rate or watched_full_video_pct
+Instagram       retention_rate
+```
+
+If the primary metric is unavailable, Statool falls back to derived
+`engagement_rate` when possible, then `interaction_count`.
+
 ## 10. SQLite Schema
 
 Table `pieces`:
@@ -160,6 +194,13 @@ shares            INTEGER
 interaction_count INTEGER
 engagement_rate   REAL
 engagement_basis  TEXT
+primary_metric_name TEXT
+primary_metric_value REAL
+primary_metric_basis TEXT
+secondary_metrics TEXT
+metric_source TEXT
+metric_confidence TEXT
+metrics_captured_at TEXT
 notes             TEXT
 collected_at      TEXT
 ```
