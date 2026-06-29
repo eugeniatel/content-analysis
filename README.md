@@ -63,6 +63,8 @@ also have a primary metric that reflects what the platform tends to reward.
 - Guarda `primary_metric_name`, `primary_metric_value`,
   `primary_metric_basis`, `secondary_metrics`, `metric_source`,
   `metric_confidence` y `metrics_captured_at`.
+- Genera reportes rankeados por metrica primaria, engagement rate o
+  interacciones.
 - Registra fallas por URL sin cortar todo el batch.
 
 ## Pipeline
@@ -186,6 +188,15 @@ https://www.linkedin.com/feed/update/urn:li:activity:123/,linkedin,1000,40,10,5,
 ```bash
 content-reference import-metrics \
   --input references/manual-metrics.csv \
+  --output-root references
+```
+
+Rank content by platform-native metrics:
+
+```bash
+content-reference report \
+  --platform linkedin \
+  --limit 10 \
   --output-root references
 ```
 

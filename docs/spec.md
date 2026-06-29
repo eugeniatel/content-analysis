@@ -167,6 +167,17 @@ Instagram       retention_rate
 If the primary metric is unavailable, Statool falls back to derived
 `engagement_rate` when possible, then `interaction_count`.
 
+## 9.2 Metrics Report
+
+`report` ranks normalized rows by the most actionable available signal:
+
+1. `primary_metric_value`.
+2. `engagement_rate`.
+3. `interaction_count`.
+
+It emits one JSON object with the ranked items, optional platform filter, row
+counts, and the metric basis used for each piece.
+
 ## 10. SQLite Schema
 
 Table `pieces`:

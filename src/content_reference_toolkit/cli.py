@@ -1089,6 +1089,70 @@ def export_jsonl(con: sqlite3.Connection, output_root: Path, out: Path | None) -
     return len(rows)
 
 
+def metric_sort_value(row: sqlite3.Row) -> float:
+    primary = parse_float(row["primary_metric_value"])
+    if primary is not None:
+        return primary
+    engagement = parse_float(row["engagement_rate"])
+    if engagement is not None:
+        return engagement
+    interactions = parse_float(row["interaction_count"])
+    if interactions is not None:
+        return interactions
+    return -1
+
+
+def metric_report(con: sqlite3.Connection, *, platform: str | None = None, limit: int = 10) -> dict[str, Any]:
+    params: list[Any] = []
+    where = ""
+    if platform:
+        where = "WHERE platform = ?"
+        params.append(platform)
+    rows = con.execute(
+        f"""
+        SELECT * FROM pieces
+        {where}
+        ORDER BY collected_at DESC, id
+        """,
+        params,
+    ).fetchall()
+    ranked = sorted(rows, key=metric_sort_value, reverse=True)[:limit]
+    items = []
+    for row in ranked:
+        item = {
+            "id": row["id"],
+            "source_url": row["source_url"],
+            "platform": row["platform"],
+            "format": row["format"],
+            "creator": row["creator"],
+            "published_at": row["published_at"],
+            "primary_metric_name": row["primary_metric_name"],
+            "primary_metric_value": row["primary_metric_value"],
+            "primary_metric_basis": row["primary_metric_basis"],
+            "metric_source": row["metric_source"],
+            "metric_confidence": row["metric_confidence"],
+            "engagement_rate": row["engagement_rate"],
+            "interaction_count": row["interaction_count"],
+            "views": row["views"],
+            "likes": row["likes"],
+            "comments": row["comments"],
+            "shares": row["shares"],
+            "caption": row["caption"],
+            "hook_spoken": row["hook_spoken"],
+            "hook_onscreen": row["hook_onscreen"],
+            "notes": row["notes"],
+        }
+        items.append(item)
+    return {
+        "status": "done",
+        "platform": platform,
+        "rows": len(items),
+        "total_rows": len(rows),
+        "ranked_by": "primary_metric_value, engagement_rate, interaction_count",
+        "items": items,
+    }
+
+
 def first_present(row: dict[str, Any], *keys: str) -> Any:
     for key in keys:
         value = row.get(key)
@@ -1333,6 +1397,13 @@ def cmd_import_metrics(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_report(args: argparse.Namespace) -> int:
+    output_root = args.output_root.resolve()
+    con = connect(output_root)
+    print_summary(metric_report(con, platform=args.platform, limit=args.limit))
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     collect_args = argparse.Namespace(**vars(args))
     cmd_collect(collect_args)
@@ -1400,6 +1471,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     add_common(import_metrics)
     import_metrics.add_argument("--input", type=Path, action="append", required=True, help="CSV with source_url/url plus metric columns.")
     import_metrics.set_defaults(func=cmd_import_metrics)
+
+    report = sub.add_parser("report", help="Rank pieces by platform-native metrics.")
+    add_common(report)
+    report.add_argument("--platform", help="Optional platform filter, e.g. instagram, tiktok, linkedin, x.")
+    report.add_argument("--limit", type=int, default=10)
+    report.set_defaults(func=cmd_report)
 
     run_all = sub.add_parser("run", help="Run collect -> extract -> normalize, optionally export.")
     add_common(run_all)

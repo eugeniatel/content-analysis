@@ -118,3 +118,55 @@ def test_import_metrics_creates_piece_with_linkedin_engagement_rate(tmp_path):
     assert row["primary_metric_name"] == "engagement_rate"
     assert row["primary_metric_value"] == 0.055
     assert row["metric_source"] == "manual_csv"
+
+
+def test_metric_report_ranks_by_primary_metric(tmp_path):
+    output_root = tmp_path / "references"
+    con = cli.connect(output_root)
+    cli.import_metric_row(
+        con,
+        output_root=output_root,
+        row={
+            "url": "https://www.tiktok.com/@x/video/1",
+            "completion_rate": "40%",
+            "likes": "100",
+        },
+    )
+    cli.import_metric_row(
+        con,
+        output_root=output_root,
+        row={
+            "url": "https://www.tiktok.com/@x/video/2",
+            "completion_rate": "75%",
+            "likes": "20",
+        },
+    )
+
+    report = cli.metric_report(con, platform="tiktok", limit=1)
+
+    assert report["rows"] == 1
+    assert report["total_rows"] == 2
+    assert report["items"][0]["source_url"] == "https://www.tiktok.com/@x/video/2"
+    assert report["items"][0]["primary_metric_name"] == "completion_rate"
+    assert report["items"][0]["primary_metric_value"] == 0.75
+
+
+def test_metric_report_falls_back_to_interactions(tmp_path):
+    output_root = tmp_path / "references"
+    con = cli.connect(output_root)
+    cli.import_metric_row(
+        con,
+        output_root=output_root,
+        row={"url": "https://example.com/a", "likes": "2", "comments": "1"},
+    )
+    cli.import_metric_row(
+        con,
+        output_root=output_root,
+        row={"url": "https://example.com/b", "likes": "20", "comments": "3"},
+    )
+
+    report = cli.metric_report(con, limit=2)
+
+    assert report["items"][0]["source_url"] == "https://example.com/b"
+    assert report["items"][0]["primary_metric_name"] == "interaction_count"
+    assert report["items"][0]["interaction_count"] == 23
