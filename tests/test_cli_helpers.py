@@ -48,6 +48,38 @@ def test_platform_for_source_detects_planned_platforms():
     assert cli.platform_for_source("https://www.facebook.com/reel/1") == "facebook"
 
 
+def test_link_intake_detects_social_profile():
+    result = cli.link_intake("https://www.instagram.com/example_brand/")
+
+    assert result["status"] == "done"
+    assert result["kind"] == "social_profile"
+    assert result["platform"] == "instagram"
+    assert result["connector_options_command"] == "content-reference connector-options instagram"
+
+
+def test_link_intake_discovers_social_profiles_on_website():
+    html = """
+    <html><body>
+      <a href="https://www.instagram.com/example_brand/">Instagram</a>
+      <a href="https://www.tiktok.com/@example_brand">TikTok</a>
+      <a href="/about">About</a>
+    </body></html>
+    """
+
+    result = cli.link_intake("https://example.com", fetch_html=lambda url: html)
+
+    assert result["kind"] == "website"
+    assert result["profiles"] == [
+        {"platform": "instagram", "url": "https://www.instagram.com/example_brand"},
+        {"platform": "tiktok", "url": "https://www.tiktok.com/@example_brand"},
+    ]
+    assert result["prompt"] == (
+        "I found these profiles [instagram: https://www.instagram.com/example_brand, "
+        "tiktok: https://www.tiktok.com/@example_brand], would you like to run content-analysis on all of them?"
+    )
+    assert result["suggested_command"] == "content-reference research-link https://example.com --all"
+
+
 def test_duration_bucket():
     assert cli.duration_bucket("carousel", None) == "carousel"
     assert cli.duration_bucket("reel", 20) == "short"
@@ -431,3 +463,18 @@ def test_metric_row_from_metadata_maps_yt_dlp_fields():
     assert row["creator"] == "creator"
     assert row["views"] == "1000"
     assert row["metric_source"] == "scrape_yt_dlp"
+
+
+def test_yt_dlp_flat_entries_maps_youtube_ids(monkeypatch):
+    class FakeProc:
+        returncode = 0
+        stdout = '{"entries":[{"url":"abc123","ie_key":"Youtube"},{"webpage_url":"https://www.youtube.com/watch?v=def456"}]}'
+        stderr = ""
+
+    monkeypatch.setattr(cli, "tool", lambda name: "/usr/bin/yt-dlp")
+    monkeypatch.setattr(cli, "run", lambda *a, **k: FakeProc())
+
+    urls, error = cli.yt_dlp_flat_entries("https://www.youtube.com/@example", None, limit=2)
+
+    assert error == ""
+    assert urls == ["https://www.youtube.com/watch?v=abc123", "https://www.youtube.com/watch?v=def456"]

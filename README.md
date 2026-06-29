@@ -126,6 +126,31 @@ Inline URLs/files:
 content-reference collect "https://www.instagram.com/mia_astral/reel/DZ8HloGBd7Q/"
 ```
 
+Link-first intake:
+
+```bash
+content-reference link-intake "https://example.com"
+```
+
+When a website link is shared, Statool scans the page for social profiles and
+returns a confirmation prompt:
+
+```text
+I found these profiles [instagram: https://www.instagram.com/example, tiktok: https://www.tiktok.com/@example], would you like to run content-analysis on all of them?
+```
+
+After confirmation, run all discovered profiles:
+
+```bash
+content-reference research-link "https://example.com" --all --output-root references
+```
+
+For a direct social profile link, run:
+
+```bash
+content-reference research-link "https://www.tiktok.com/@example" --output-root references
+```
+
 TXT:
 
 ```text

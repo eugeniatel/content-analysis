@@ -37,6 +37,21 @@ TXT or CSV. CSV columns:
 
 Local media paths are also valid for manually exported screenshots/videos.
 
+Link-first intake:
+
+- `link-intake <url>` classifies the shared link.
+- If the URL is a social profile, it returns the platform and suggested
+  `research-link` command.
+- If the URL is social content, it returns the platform and suggested metric
+  command.
+- If the URL is a website, it fetches the page, finds social profile links, and
+  returns: `I found these profiles [...], would you like to run
+  content-analysis on all of them?`
+- `research-link <website> --all` runs content analysis on all discovered
+  profiles after confirmation.
+- `research-link <social-profile>` expands recent profile URLs with
+  `yt-dlp --flat-playlist` when supported, then imports best-effort metadata.
+
 Manual metric CSVs are also valid through `import-metrics`. Supported columns
 include:
 

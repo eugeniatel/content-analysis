@@ -13,10 +13,11 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, quote, urlencode, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 
@@ -228,9 +229,175 @@ def http_get_json(url: str, *, headers: dict[str, str] | None = None, timeout: i
         raise RuntimeError(f"invalid JSON response: {exc}") from exc
 
 
+def http_get_text(url: str, *, headers: dict[str, str] | None = None, timeout: int = 30) -> str:
+    request_headers = {"User-Agent": "content-reference-toolkit/0.1"}
+    request_headers.update(headers or {})
+    request = Request(url, headers=request_headers)
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            content_type = response.headers.get("content-type", "")
+            charset = "utf-8"
+            match = re.search(r"charset=([^;]+)", content_type, re.I)
+            if match:
+                charset = match.group(1).strip()
+            return response.read().decode(charset, errors="replace")
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {exc.code}: {body}") from exc
+    except URLError as exc:
+        raise RuntimeError(str(exc.reason)) from exc
+
+
+class LinkParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.links: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() != "a":
+            return
+        for key, value in attrs:
+            if key.lower() == "href" and value:
+                self.links.append(value)
+
+
 def is_url(value: str) -> bool:
     parsed = urlparse(value)
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def social_platform_from_host(host: str) -> str | None:
+    host = host.lower()
+    if "instagram.com" in host:
+        return "instagram"
+    if "tiktok.com" in host:
+        return "tiktok"
+    if "x.com" in host or "twitter.com" in host:
+        return "x"
+    if "linkedin.com" in host:
+        return "linkedin"
+    if "youtube.com" in host or "youtu.be" in host:
+        return "youtube"
+    if "threads.net" in host:
+        return "threads"
+    if "facebook.com" in host or "fb.watch" in host:
+        return "facebook"
+    return None
+
+
+def is_social_content_url(source: str) -> bool:
+    parsed = urlparse(source)
+    path = parsed.path.lower()
+    platform = social_platform_from_host(parsed.netloc)
+    if platform == "instagram":
+        return any(part in path for part in ("/p/", "/reel/", "/tv/"))
+    if platform == "tiktok":
+        return "/video/" in path
+    if platform == "x":
+        return bool(x_post_id(source))
+    if platform == "linkedin":
+        return "activity:" in source or "/feed/update/" in path or "/posts/" in path
+    if platform == "youtube":
+        return bool(youtube_video_id(source))
+    if platform == "threads":
+        return "/post/" in path or bool(re.search(r"/@[^/]+/post/", path))
+    if platform == "facebook":
+        return any(part in path for part in ("/posts/", "/videos/", "/reel/", "/watch/"))
+    return False
+
+
+def is_social_profile_url(source: str) -> bool:
+    parsed = urlparse(source)
+    platform = social_platform_from_host(parsed.netloc)
+    if not platform or is_social_content_url(source):
+        return False
+    path = parsed.path.strip("/")
+    if not path:
+        return False
+    if platform == "instagram":
+        return len(path.split("/")) == 1
+    if platform == "tiktok":
+        return path.startswith("@") and "/video/" not in path
+    if platform == "x":
+        return len(path.split("/")) == 1 and path not in {"home", "explore", "search", "settings"}
+    if platform == "linkedin":
+        return path.startswith(("in/", "company/", "school/"))
+    if platform == "youtube":
+        return path.startswith(("@", "channel/", "c/", "user/"))
+    if platform == "threads":
+        return path.startswith("@") and "/post/" not in path
+    if platform == "facebook":
+        return True
+    return False
+
+
+def normalize_url(source: str) -> str:
+    parsed = urlparse(source)
+    cleaned = parsed._replace(fragment="")
+    url = cleaned.geturl()
+    return url.rstrip("/")
+
+
+def discover_social_profiles(html: str, base_url: str) -> list[dict[str, str]]:
+    parser = LinkParser()
+    parser.feed(html)
+    seen: set[str] = set()
+    profiles: list[dict[str, str]] = []
+    for href in parser.links:
+        if href.startswith(("mailto:", "tel:", "#")):
+            continue
+        url = normalize_url(urljoin(base_url, href))
+        if url in seen or not is_url(url) or not is_social_profile_url(url):
+            continue
+        platform = platform_for_source(url)
+        seen.add(url)
+        profiles.append({"platform": platform, "url": url})
+    return profiles
+
+
+def profile_prompt(profiles: list[dict[str, str]]) -> str:
+    urls = ", ".join(f"{item['platform']}: {item['url']}" for item in profiles)
+    return f"I found these profiles [{urls}], would you like to run content-analysis on all of them?"
+
+
+def link_intake(source: str, *, fetch_html: Any = http_get_text) -> dict[str, Any]:
+    if not is_url(source):
+        return {"status": "error", "error": "source must be an http(s) URL", "source": source}
+    platform = platform_for_source(source)
+    if platform != "unknown":
+        if is_social_profile_url(source):
+            return {
+                "status": "done",
+                "kind": "social_profile",
+                "platform": platform,
+                "url": normalize_url(source),
+                "suggested_command": f"content-reference research-link {source}",
+                "connector_options_command": f"content-reference connector-options {platform}",
+            }
+        return {
+            "status": "done",
+            "kind": "social_content",
+            "platform": platform,
+            "url": normalize_url(source),
+            "suggested_command": f"content-reference scrape-metrics --platform {platform} {source}",
+            "connector_options_command": f"content-reference connector-options {platform}",
+        }
+
+    html = fetch_html(source)
+    profiles = discover_social_profiles(html, source)
+    result: dict[str, Any] = {
+        "status": "done",
+        "kind": "website",
+        "url": normalize_url(source),
+        "profiles": profiles,
+    }
+    if profiles:
+        result["prompt"] = profile_prompt(profiles)
+        result["suggested_command"] = f"content-reference research-link {source} --all"
+        result["profile_commands"] = [f"content-reference research-link {item['url']}" for item in profiles]
+    else:
+        result["prompt"] = "No social profiles found on this website."
+    return result
 
 
 def youtube_video_id(source: str) -> str | None:
@@ -577,6 +744,36 @@ def yt_dlp_metadata(source: str, cookies_file: Path | None) -> tuple[dict[str, A
         return json.loads(proc.stdout), ""
     except json.JSONDecodeError as exc:
         return None, f"yt-dlp returned invalid JSON: {exc}"
+
+
+def yt_dlp_flat_entries(source: str, cookies_file: Path | None, *, limit: int) -> tuple[list[str], str]:
+    exe = tool("yt-dlp")
+    if not exe:
+        return [], "yt-dlp not found"
+    cmd = [exe, "--flat-playlist", "--dump-single-json", "--no-warnings", "--playlist-end", str(limit)]
+    if cookies_file:
+        cmd += ["--cookies", str(cookies_file)]
+    cmd.append(source)
+    proc = run(cmd, timeout=180)
+    if proc.returncode != 0:
+        return [], proc.stderr.strip() or proc.stdout.strip()
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        return [], f"yt-dlp returned invalid JSON: {exc}"
+    entries = data.get("entries") or []
+    urls: list[str] = []
+    for entry in entries[:limit]:
+        url = entry.get("url") or entry.get("webpage_url")
+        if not url:
+            continue
+        if is_url(url):
+            urls.append(url)
+        elif entry.get("ie_key") == "Youtube" or platform_for_source(source) == "youtube":
+            urls.append(f"https://www.youtube.com/watch?v={url}")
+        else:
+            urls.append(str(url))
+    return urls, ""
 
 
 def gallery_dl_download(source: str, outdir: Path, cookies_file: Path | None) -> tuple[list[Path], str]:
@@ -2029,6 +2226,67 @@ def cmd_scrape_metrics(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_link_intake(args: argparse.Namespace) -> int:
+    for source in args.sources:
+        try:
+            result = link_intake(source)
+        except Exception as exc:
+            result = {"status": "failed", "source": source, "error": str(exc)}
+        print_summary(result)
+    return 0
+
+
+def cmd_research_link(args: argparse.Namespace) -> int:
+    output_root = args.output_root.resolve()
+    con = connect(output_root)
+    profile_urls: list[str] = []
+    for source in args.sources:
+        try:
+            intake = link_intake(source)
+        except Exception as exc:
+            print_summary({"status": "failed", "source": source, "error": str(exc)})
+            continue
+        if intake.get("kind") == "website":
+            profiles = intake.get("profiles") or []
+            if not args.all:
+                print_summary(intake)
+                continue
+            profile_urls.extend(item["url"] for item in profiles)
+        elif intake.get("kind") == "social_profile":
+            profile_urls.append(intake["url"])
+        else:
+            profile_urls.append(source)
+
+    count = 0
+    for profile in profile_urls:
+        platform = platform_for_source(profile)
+        urls = [profile]
+        if is_social_profile_url(profile):
+            expanded, error = yt_dlp_flat_entries(profile, args.cookies, limit=args.limit)
+            if error:
+                record_failure(con, source_id_=source_id(profile), source_url=profile, stage="research-link", message=error)
+                print_summary({"status": "failed", "source": profile, "error": error})
+                continue
+            urls = expanded or [profile]
+        for url in urls[:args.limit]:
+            metadata, error = yt_dlp_metadata(url, args.cookies)
+            if error:
+                record_failure(con, source_id_=source_id(url), source_url=url, stage="research-link", message=error)
+                print_summary({"status": "failed", "source": url, "error": error})
+                continue
+            if not metadata:
+                continue
+            row = metric_row_from_metadata(url, metadata, platform=platform if platform != "unknown" else None, metric_source="research_link_yt_dlp")
+            result = import_metric_row(con, output_root=output_root, row=row)
+            print_summary(result)
+            if result.get("status") == "done":
+                count += 1
+            if args.delay:
+                time.sleep(args.delay)
+    print_summary({"status": "done", "rows": count})
+    return 0
+
+
 def cmd_connector_options(args: argparse.Namespace) -> int:
     print_summary(connector_options(args.platform))
     return 0
@@ -2158,6 +2416,19 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     scrape_metrics.add_argument("--cookies", type=Path, help="Optional explicit cookies.txt. Browser cookies are never auto-extracted.")
     scrape_metrics.add_argument("--delay", type=float, default=4.0)
     scrape_metrics.set_defaults(func=cmd_scrape_metrics)
+
+    link_intake_parser = sub.add_parser("link-intake", help="Classify a shared link and discover social profiles on websites.")
+    link_intake_parser.add_argument("sources", nargs="+")
+    link_intake_parser.set_defaults(func=cmd_link_intake)
+
+    research_link_parser = sub.add_parser("research-link", help="Research social profile links or confirmed website profile discoveries.")
+    add_common(research_link_parser)
+    research_link_parser.add_argument("sources", nargs="+")
+    research_link_parser.add_argument("--all", action="store_true", help="When a website is passed, run all discovered profiles.")
+    research_link_parser.add_argument("--limit", type=int, default=12, help="Maximum recent URLs per profile.")
+    research_link_parser.add_argument("--cookies", type=Path, help="Optional explicit cookies.txt. Browser cookies are never auto-extracted.")
+    research_link_parser.add_argument("--delay", type=float, default=4.0)
+    research_link_parser.set_defaults(func=cmd_research_link)
 
     connector_options_parser = sub.add_parser("connector-options", help="Show acquisition modes for one or all platforms.")
     connector_options_parser.add_argument("platform", nargs="?")
