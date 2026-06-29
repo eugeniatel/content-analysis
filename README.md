@@ -180,6 +180,10 @@ Local carousel screenshots:
 
 Manual platform metrics:
 
+```bash
+content-reference metric-template linkedin > references/linkedin-metrics.csv
+```
+
 ```csv
 url,platform,impressions,reactions,comments,reposts,engagement_rate
 https://www.linkedin.com/feed/update/urn:li:activity:123/,linkedin,1000,40,10,5,5.5%

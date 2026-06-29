@@ -51,6 +51,9 @@ include:
 - `primary_metric_name`, `primary_metric_value` for explicit overrides.
 - `metric_source`, `metrics_captured_at`, `notes`.
 
+`metric-template <platform>` prints a CSV header plus example row for supported
+manual metric platforms.
+
 ## 4. OSS Stack
 
 - `yt-dlp`: video and metadata for reels/TikToks.
@@ -154,6 +157,9 @@ Export `pieces` to `corpus.jsonl`, one object per line.
 This allows Statool to track X/Twitter, LinkedIn, TikTok, Instagram, YouTube, or
 other platform performance before full media collection exists for each
 platform.
+
+`metric-template` supports `x`, `twitter`, `linkedin`, `tiktok`, `instagram`,
+and `youtube`.
 
 Primary platform metric defaults:
 

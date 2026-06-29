@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import io
 from pathlib import Path
 
 from content_reference_toolkit import cli
@@ -170,3 +172,21 @@ def test_metric_report_falls_back_to_interactions(tmp_path):
     assert report["items"][0]["source_url"] == "https://example.com/b"
     assert report["items"][0]["primary_metric_name"] == "interaction_count"
     assert report["items"][0]["interaction_count"] == 23
+
+
+def test_metric_template_outputs_linkedin_csv():
+    rows = list(csv.DictReader(io.StringIO(cli.metric_template("linkedin"))))
+
+    assert rows[0]["platform"] == "linkedin"
+    assert rows[0]["engagement_rate"] == "5.5%"
+    assert "comments" in rows[0]
+    assert "reposts" in rows[0]
+
+
+def test_metric_template_rejects_unknown_platform():
+    try:
+        cli.metric_template("myspace")
+    except ValueError as exc:
+        assert "unknown platform" in str(exc)
+    else:
+        raise AssertionError("Expected unknown platform to raise ValueError")

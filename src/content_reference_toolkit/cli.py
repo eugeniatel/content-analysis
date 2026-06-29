@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import io
 import json
 import shutil
 import sqlite3
@@ -33,6 +34,34 @@ PRIMARY_METRIC_BY_PLATFORM = {
     "linkedin": ("engagement_rate", ("engagement_rate",)),
     "tiktok": ("completion_rate", ("completion_rate", "watched_full_video_pct")),
     "instagram": ("retention_rate", ("retention_rate",)),
+}
+METRIC_TEMPLATES = {
+    "x": [
+        "url", "platform", "published_at", "creator", "impressions", "likes",
+        "replies", "reposts", "bookmarks", "profile_clicks", "notes",
+    ],
+    "twitter": [
+        "url", "platform", "published_at", "creator", "impressions", "likes",
+        "replies", "reposts", "bookmarks", "profile_clicks", "notes",
+    ],
+    "linkedin": [
+        "url", "platform", "published_at", "creator", "impressions",
+        "reactions", "comments", "reposts", "clicks", "engagement_rate",
+        "notes",
+    ],
+    "tiktok": [
+        "url", "platform", "published_at", "creator", "views", "likes",
+        "comments", "shares", "avg_watch_time", "watched_full_video_pct",
+        "completion_rate", "notes",
+    ],
+    "instagram": [
+        "url", "platform", "published_at", "creator", "reach", "plays",
+        "likes", "comments", "shares", "saves", "retention_rate", "notes",
+    ],
+    "youtube": [
+        "url", "platform", "published_at", "creator", "views", "likes",
+        "comments", "shares", "avg_watch_time", "retention_rate", "notes",
+    ],
 }
 
 
@@ -1153,6 +1182,37 @@ def metric_report(con: sqlite3.Connection, *, platform: str | None = None, limit
     }
 
 
+def metric_template(platform: str, *, include_example: bool = True) -> str:
+    platform_key = platform.lower()
+    columns = METRIC_TEMPLATES.get(platform_key)
+    if not columns:
+        known = ", ".join(sorted(METRIC_TEMPLATES))
+        raise ValueError(f"unknown platform '{platform}'. Known platforms: {known}")
+    rows = [columns]
+    if include_example:
+        example = {column: "" for column in columns}
+        example["url"] = f"https://example.com/{platform_key}/post"
+        example["platform"] = "x" if platform_key == "twitter" else platform_key
+        example["published_at"] = "2026-06-29"
+        example["creator"] = "example_creator"
+        example["notes"] = "why this post matters"
+        if platform_key in {"x", "twitter"}:
+            example.update({"impressions": "1000", "likes": "25", "replies": "8", "reposts": "4", "bookmarks": "12"})
+        elif platform_key == "linkedin":
+            example.update({"impressions": "1000", "reactions": "40", "comments": "10", "reposts": "5", "clicks": "30", "engagement_rate": "5.5%"})
+        elif platform_key == "tiktok":
+            example.update({"views": "1000", "likes": "80", "comments": "12", "shares": "7", "avg_watch_time": "8.4", "watched_full_video_pct": "42%", "completion_rate": "42%"})
+        elif platform_key == "instagram":
+            example.update({"reach": "1000", "plays": "1400", "likes": "90", "comments": "8", "shares": "20", "saves": "15", "retention_rate": "38%"})
+        elif platform_key == "youtube":
+            example.update({"views": "1000", "likes": "70", "comments": "9", "shares": "4", "avg_watch_time": "12.5", "retention_rate": "45%"})
+        rows.append([example[column] for column in columns])
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerows(rows)
+    return out.getvalue()
+
+
 def first_present(row: dict[str, Any], *keys: str) -> Any:
     for key in keys:
         value = row.get(key)
@@ -1404,6 +1464,15 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_metric_template(args: argparse.Namespace) -> int:
+    try:
+        sys.stdout.write(metric_template(args.platform, include_example=not args.header_only))
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     collect_args = argparse.Namespace(**vars(args))
     cmd_collect(collect_args)
@@ -1477,6 +1546,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     report.add_argument("--platform", help="Optional platform filter, e.g. instagram, tiktok, linkedin, x.")
     report.add_argument("--limit", type=int, default=10)
     report.set_defaults(func=cmd_report)
+
+    template = sub.add_parser("metric-template", help="Print a platform-specific manual metrics CSV template.")
+    template.add_argument("platform", help="x, linkedin, tiktok, instagram, youtube.")
+    template.add_argument("--header-only", action="store_true")
+    template.set_defaults(func=cmd_metric_template)
 
     run_all = sub.add_parser("run", help="Run collect -> extract -> normalize, optionally export.")
     add_common(run_all)
