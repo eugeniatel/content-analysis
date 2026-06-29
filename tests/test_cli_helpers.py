@@ -31,6 +31,14 @@ def test_detect_format_uses_url_and_media():
     assert cli.infer_format("/tmp/a.png", None, [Path("/tmp/a.png")]) == "carousel"
 
 
+def test_extracts_platform_ids():
+    assert cli.youtube_video_id("https://www.youtube.com/shorts/abc123") == "abc123"
+    assert cli.youtube_video_id("https://youtu.be/abc123") == "abc123"
+    assert cli.youtube_video_id("https://www.youtube.com/watch?v=abc123&t=1") == "abc123"
+    assert cli.x_post_id("https://x.com/euge/status/123456") == "123456"
+    assert cli.linkedin_activity_urn("https://www.linkedin.com/feed/update/urn:li:activity:123456/") == "urn:li:activity:123456"
+
+
 def test_platform_for_source_detects_planned_platforms():
     assert cli.platform_for_source("https://x.com/euge/status/1") == "x"
     assert cli.platform_for_source("https://twitter.com/euge/status/1") == "x"
@@ -280,3 +288,65 @@ def test_analytics_report_groups_by_format_hook_and_cta(tmp_path):
     assert round(report["formats"][0]["avg_metric"], 3) == 0.6
     assert report["hook_onscreen"][0]["key"] == "hook A"
     assert report["cta_spoken"][0]["key"] == "comment below"
+
+
+def test_fetch_youtube_metrics_maps_statistics():
+    def fake_get(url, **kwargs):
+        assert "youtube/v3/videos" in url
+        return {
+            "items": [{
+                "snippet": {"channelTitle": "Creator", "publishedAt": "2026-06-29T00:00:00Z", "title": "Short title"},
+                "statistics": {"viewCount": "1000", "likeCount": "70", "commentCount": "9"},
+            }]
+        }
+
+    row = cli.fetch_youtube_metrics("https://www.youtube.com/shorts/abc123", api_key="key", http_get=fake_get)
+
+    assert row["platform"] == "youtube"
+    assert row["format"] == "short"
+    assert row["views"] == "1000"
+    assert row["metric_source"] == "youtube_api"
+
+
+def test_fetch_x_metrics_maps_public_metrics():
+    def fake_get(url, **kwargs):
+        assert "api.x.com/2/tweets/123456" in url
+        assert kwargs["headers"]["Authorization"] == "Bearer token"
+        return {
+            "data": {
+                "created_at": "2026-06-29T00:00:00Z",
+                "text": "hello",
+                "public_metrics": {"like_count": 10, "reply_count": 4, "retweet_count": 3, "quote_count": 2},
+            },
+            "includes": {"users": [{"username": "euge"}]},
+        }
+
+    row = cli.fetch_x_metrics("https://x.com/euge/status/123456", bearer_token="token", http_get=fake_get)
+
+    assert row["platform"] == "x"
+    assert row["creator"] == "euge"
+    assert row["replies"] == "4"
+    assert row["metric_source"] == "x_api"
+
+
+def test_fetch_linkedin_metrics_maps_social_actions():
+    def fake_get(url, **kwargs):
+        assert "socialActions/urn%3Ali%3Aactivity%3A123456" in url
+        assert kwargs["headers"]["X-Restli-Protocol-Version"] == "2.0.0"
+        return {
+            "likesSummary": {"totalLikes": 11},
+            "commentsSummary": {"aggregatedTotalComments": 6},
+            "sharesSummary": {"totalShares": 2},
+        }
+
+    row = cli.fetch_linkedin_metrics(
+        "https://www.linkedin.com/feed/update/urn:li:activity:123456/",
+        access_token="token",
+        restli_protocol_version="2.0.0",
+        http_get=fake_get,
+    )
+
+    assert row["platform"] == "linkedin"
+    assert row["likes"] == "11"
+    assert row["comments"] == "6"
+    assert row["reposts"] == "2"

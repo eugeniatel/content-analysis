@@ -183,6 +183,25 @@ Instagram       retention_rate
 If the primary metric is unavailable, Statool falls back to derived
 `engagement_rate` when possible, then `interaction_count`.
 
+## 9.1.1 Authenticated Metrics Fetch
+
+`fetch-metrics` imports metrics from authenticated platform APIs and then writes
+through the same normalization path as `import-metrics`.
+
+Supported API fetchers:
+
+- YouTube: `--platform youtube`, using `--api-key` or `YOUTUBE_API_KEY`.
+  Fetches `videos.list` statistics/snippet/contentDetails for a video or Shorts
+  URL.
+- X/Twitter: `--platform x`, using `--bearer-token` or `X_BEARER_TOKEN`.
+  Fetches post lookup fields and public metrics.
+- LinkedIn: `--platform linkedin`, using `--access-token` or
+  `LINKEDIN_ACCESS_TOKEN`. Fetches `socialActions` aggregate counts for an
+  activity URN.
+
+The CLI does not store tokens, does not auto-extract browser cookies, and logs
+per-source API failures to `failures`.
+
 ## 9.2 Metrics Report
 
 `report` ranks normalized rows by the most actionable available signal:

@@ -5,6 +5,8 @@ import csv
 import hashlib
 import io
 import json
+import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -13,7 +15,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
-from urllib.parse import urlparse
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, quote, urlencode, urlparse
+from urllib.request import Request, urlopen
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
@@ -150,9 +154,50 @@ def run(cmd: list[str], *, cwd: Path | None = None, timeout: int | None = None) 
     )
 
 
+def http_get_json(url: str, *, headers: dict[str, str] | None = None, timeout: int = 30) -> dict[str, Any]:
+    request = Request(url, headers=headers or {})
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {exc.code}: {body}") from exc
+    except URLError as exc:
+        raise RuntimeError(str(exc.reason)) from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"invalid JSON response: {exc}") from exc
+
+
 def is_url(value: str) -> bool:
     parsed = urlparse(value)
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def youtube_video_id(source: str) -> str | None:
+    parsed = urlparse(source)
+    host = parsed.netloc.lower()
+    if "youtu.be" in host:
+        return parsed.path.strip("/").split("/")[0] or None
+    if "youtube.com" in host:
+        if parsed.path.startswith("/shorts/") or parsed.path.startswith("/embed/"):
+            return parsed.path.strip("/").split("/")[1] if len(parsed.path.strip("/").split("/")) > 1 else None
+        params = parse_qs(parsed.query)
+        return params.get("v", [None])[0]
+    return None
+
+
+def x_post_id(source: str) -> str | None:
+    match = re.search(r"/status(?:es)?/(\d+)", source)
+    return match.group(1) if match else None
+
+
+def linkedin_activity_urn(source: str) -> str | None:
+    if source.startswith("urn:li:"):
+        return source
+    match = re.search(r"activity[:/-](\d+)", source)
+    if match:
+        return f"urn:li:activity:{match.group(1)}"
+    return None
 
 
 def url_hash(source: str) -> str:
@@ -1572,6 +1617,106 @@ def import_metric_row(con: sqlite3.Connection, *, output_root: Path, row: dict[s
     }
 
 
+def fetch_youtube_metrics(source: str, *, api_key: str, http_get: Any = http_get_json) -> dict[str, str]:
+    video_id = youtube_video_id(source)
+    if not video_id:
+        raise ValueError(f"Could not extract YouTube video id from {source}")
+    params = urlencode({"part": "snippet,statistics,contentDetails", "id": video_id, "key": api_key})
+    data = http_get(f"https://www.googleapis.com/youtube/v3/videos?{params}")
+    items = data.get("items") or []
+    if not items:
+        raise RuntimeError(f"YouTube video not found: {video_id}")
+    item = items[0]
+    snippet = item.get("snippet") or {}
+    stats = item.get("statistics") or {}
+    return {
+        "url": source,
+        "platform": "youtube",
+        "format": "short" if "/shorts/" in source else "video",
+        "creator": str(snippet.get("channelTitle") or ""),
+        "published_at": str(snippet.get("publishedAt") or "")[:10],
+        "caption": str(snippet.get("title") or ""),
+        "views": str(stats.get("viewCount") or ""),
+        "likes": str(stats.get("likeCount") or ""),
+        "comments": str(stats.get("commentCount") or ""),
+        "metric_source": "youtube_api",
+    }
+
+
+def fetch_x_metrics(source: str, *, bearer_token: str, http_get: Any = http_get_json) -> dict[str, str]:
+    post_id = x_post_id(source)
+    if not post_id:
+        raise ValueError(f"Could not extract X post id from {source}")
+    params = urlencode({
+        "tweet.fields": "created_at,public_metrics,text",
+        "expansions": "author_id",
+        "user.fields": "username,name",
+    })
+    headers = {"Authorization": f"Bearer {bearer_token}"}
+    data = http_get(f"https://api.x.com/2/tweets/{post_id}?{params}", headers=headers)
+    tweet = data.get("data") or {}
+    metrics = tweet.get("public_metrics") or {}
+    users = ((data.get("includes") or {}).get("users") or [])
+    creator = users[0].get("username") if users else ""
+    return {
+        "url": source,
+        "platform": "x",
+        "format": "post",
+        "creator": str(creator or ""),
+        "published_at": str(tweet.get("created_at") or "")[:10],
+        "caption": str(tweet.get("text") or ""),
+        "likes": str(metrics.get("like_count") or ""),
+        "replies": str(metrics.get("reply_count") or ""),
+        "reposts": str(metrics.get("retweet_count") or ""),
+        "quotes": str(metrics.get("quote_count") or ""),
+        "metric_source": "x_api",
+    }
+
+
+def fetch_linkedin_metrics(source: str, *, access_token: str, restli_protocol_version: str, http_get: Any = http_get_json) -> dict[str, str]:
+    urn = linkedin_activity_urn(source)
+    if not urn:
+        raise ValueError(f"Could not extract LinkedIn activity URN from {source}")
+    encoded = quote(urn, safe="")
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "X-Restli-Protocol-Version": restli_protocol_version,
+    }
+    data = http_get(f"https://api.linkedin.com/v2/socialActions/{encoded}", headers=headers)
+    likes_summary = data.get("likesSummary") or {}
+    comments_summary = data.get("commentsSummary") or {}
+    shares_summary = data.get("sharesSummary") or {}
+    return {
+        "url": source,
+        "platform": "linkedin",
+        "format": "post",
+        "likes": str(likes_summary.get("totalLikes") or likes_summary.get("aggregatedTotalLikes") or ""),
+        "comments": str(comments_summary.get("aggregatedTotalComments") or comments_summary.get("totalFirstLevelComments") or ""),
+        "reposts": str(shares_summary.get("totalShares") or shares_summary.get("aggregatedTotalShares") or ""),
+        "metric_source": "linkedin_api",
+    }
+
+
+def fetch_platform_metric_row(args: argparse.Namespace, source: str) -> dict[str, str]:
+    platform = args.platform.lower()
+    if platform == "youtube":
+        api_key = args.api_key or os.environ.get("YOUTUBE_API_KEY")
+        if not api_key:
+            raise ValueError("Missing YouTube API key. Pass --api-key or set YOUTUBE_API_KEY.")
+        return fetch_youtube_metrics(source, api_key=api_key)
+    if platform in {"x", "twitter"}:
+        bearer_token = args.bearer_token or os.environ.get("X_BEARER_TOKEN")
+        if not bearer_token:
+            raise ValueError("Missing X bearer token. Pass --bearer-token or set X_BEARER_TOKEN.")
+        return fetch_x_metrics(source, bearer_token=bearer_token)
+    if platform == "linkedin":
+        access_token = args.access_token or os.environ.get("LINKEDIN_ACCESS_TOKEN")
+        if not access_token:
+            raise ValueError("Missing LinkedIn access token. Pass --access-token or set LINKEDIN_ACCESS_TOKEN.")
+        return fetch_linkedin_metrics(source, access_token=access_token, restli_protocol_version=args.restli_protocol_version)
+    raise ValueError(f"Unsupported API platform: {args.platform}")
+
+
 def selected_sources(con: sqlite3.Connection, ids: list[str] | None = None) -> list[sqlite3.Row]:
     if ids:
         q = ",".join("?" for _ in ids)
@@ -1653,6 +1798,31 @@ def cmd_import_metrics(args: argparse.Namespace) -> int:
             print_summary(result)
             if result.get("status") == "done":
                 count += 1
+    print_summary({"status": "done", "rows": count})
+    return 0
+
+
+def cmd_fetch_metrics(args: argparse.Namespace) -> int:
+    output_root = args.output_root.resolve()
+    con = connect(output_root)
+    rows = load_inputs(args.input or [], args.sources or [])
+    if not rows:
+        print("No sources provided.", file=sys.stderr)
+        return 2
+    count = 0
+    for item in rows:
+        source = item["url"]
+        try:
+            metric_row = fetch_platform_metric_row(args, source)
+            if item.get("notes"):
+                metric_row["notes"] = item["notes"]
+            result = import_metric_row(con, output_root=output_root, row=metric_row)
+        except Exception as exc:
+            record_failure(con, source_id_=source_id(source), source_url=source, stage="fetch-metrics", message=str(exc))
+            result = {"source": source, "status": "failed", "error": str(exc)}
+        print_summary(result)
+        if result.get("status") == "done":
+            count += 1
     print_summary({"status": "done", "rows": count})
     return 0
 
@@ -1754,6 +1924,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     add_common(import_metrics)
     import_metrics.add_argument("--input", type=Path, action="append", required=True, help="CSV with source_url/url plus metric columns.")
     import_metrics.set_defaults(func=cmd_import_metrics)
+
+    fetch_metrics = sub.add_parser("fetch-metrics", help="Fetch metrics from an authenticated platform API.")
+    add_common(fetch_metrics)
+    fetch_metrics.add_argument("sources", nargs="*", help="URLs or platform IDs/URNs.")
+    fetch_metrics.add_argument("--input", type=Path, action="append", help="TXT or CSV with url,format_hint,notes columns.")
+    fetch_metrics.add_argument("--platform", required=True, choices=["youtube", "x", "twitter", "linkedin"])
+    fetch_metrics.add_argument("--api-key", help="YouTube API key. Defaults to YOUTUBE_API_KEY.")
+    fetch_metrics.add_argument("--bearer-token", help="X bearer token. Defaults to X_BEARER_TOKEN.")
+    fetch_metrics.add_argument("--access-token", help="LinkedIn access token. Defaults to LINKEDIN_ACCESS_TOKEN.")
+    fetch_metrics.add_argument("--restli-protocol-version", default="2.0.0")
+    fetch_metrics.set_defaults(func=cmd_fetch_metrics)
 
     report = sub.add_parser("report", help="Rank pieces by platform-native metrics.")
     add_common(report)

@@ -25,9 +25,9 @@ analysis features.
 | Instagram | Reels, carousels | Cubierto |
 | TikTok | Videos | Cubierto |
 | Local files | Videos, audios, imagenes | Cubierto como fallback/manual |
-| X/Twitter | Posts, threads, videos | No cubierto |
-| LinkedIn | Posts, carousels/docs, video | No cubierto |
-| YouTube Shorts | Shorts/video | No explicito |
+| X/Twitter | Posts | Metricas via API; media no cubierto |
+| LinkedIn | Posts | Metricas via API; media no cubierto |
+| YouTube Shorts | Shorts/video | Media via `yt-dlp`; metricas via API |
 | Facebook/Threads | Posts/video | No cubierto |
 
 ## Platform Metric Priorities
@@ -45,6 +45,7 @@ also have a primary metric that reflects what the platform tends to reward.
 ## Current Capabilities
 
 - Descarga media y metadata con `yt-dlp` y `gallery-dl`.
+- Trae metricas via APIs autenticadas para YouTube, X/Twitter y LinkedIn.
 - Acepta URLs, TXT, CSV y archivos locales.
 - Importa CSVs manuales de metricas para plataformas todavia no cubiertas por
   descarga automatica, incluyendo headers comunes de exports como
@@ -195,6 +196,25 @@ https://www.linkedin.com/feed/update/urn:li:activity:123/,linkedin,1000,40,10,5,
 ```bash
 content-reference import-metrics \
   --input references/manual-metrics.csv \
+  --output-root references
+```
+
+Authenticated platform metrics:
+
+```bash
+YOUTUBE_API_KEY=... content-reference fetch-metrics \
+  --platform youtube \
+  "https://www.youtube.com/shorts/VIDEO_ID" \
+  --output-root references
+
+X_BEARER_TOKEN=... content-reference fetch-metrics \
+  --platform x \
+  "https://x.com/user/status/1234567890" \
+  --output-root references
+
+LINKEDIN_ACCESS_TOKEN=... content-reference fetch-metrics \
+  --platform linkedin \
+  "https://www.linkedin.com/feed/update/urn:li:activity:1234567890/" \
   --output-root references
 ```
 
