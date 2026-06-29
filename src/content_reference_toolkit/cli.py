@@ -132,6 +132,11 @@ METRIC_TEMPLATES = {
         "hook_onscreen", "hook_spoken", "cta_spoken", "notes",
     ],
 }
+DEFAULT_GRAPH_INSIGHT_METRICS = {
+    "instagram": "reach,plays,saved,shares,total_interactions,likes,comments",
+    "facebook": "post_impressions,post_engaged_users,post_clicks",
+    "threads": "views,likes,replies,reposts,quotes,shares",
+}
 
 
 def utc_now() -> str:
@@ -1697,6 +1702,55 @@ def fetch_linkedin_metrics(source: str, *, access_token: str, restli_protocol_ve
     }
 
 
+def latest_insight_value(item: dict[str, Any]) -> Any:
+    values = item.get("values")
+    if isinstance(values, list) and values:
+        return values[-1].get("value")
+    return item.get("value")
+
+
+def meta_metric_name(name: str) -> str:
+    mapping = {
+        "post_impressions": "impressions",
+        "post_engaged_users": "engaged_users",
+        "post_clicks": "clicks",
+        "saved": "saves",
+        "total_interactions": "interaction_count",
+        "replies": "comments",
+        "quotes": "quotes",
+    }
+    return mapping.get(name, canonical_column_name(name))
+
+
+def fetch_meta_graph_insights(
+    source: str,
+    *,
+    platform: str,
+    access_token: str,
+    graph_version: str,
+    metrics: str,
+    http_get: Any = http_get_json,
+) -> dict[str, str]:
+    object_id = source.strip()
+    if is_url(object_id):
+        raise ValueError("Meta Graph fetches require an object/media ID, not a public URL.")
+    params = urlencode({"metric": metrics, "access_token": access_token})
+    data = http_get(f"https://graph.facebook.com/{graph_version}/{quote(object_id, safe='')}/insights?{params}")
+    row = {
+        "url": object_id,
+        "platform": platform,
+        "format": "post",
+        "metric_source": f"{platform}_graph_api",
+    }
+    for item in data.get("data") or []:
+        name = str(item.get("name") or "")
+        value = latest_insight_value(item)
+        if not name or value is None:
+            continue
+        row[meta_metric_name(name)] = str(value)
+    return row
+
+
 def fetch_platform_metric_row(args: argparse.Namespace, source: str) -> dict[str, str]:
     platform = args.platform.lower()
     if platform == "youtube":
@@ -1714,6 +1768,18 @@ def fetch_platform_metric_row(args: argparse.Namespace, source: str) -> dict[str
         if not access_token:
             raise ValueError("Missing LinkedIn access token. Pass --access-token or set LINKEDIN_ACCESS_TOKEN.")
         return fetch_linkedin_metrics(source, access_token=access_token, restli_protocol_version=args.restli_protocol_version)
+    if platform in {"instagram", "facebook", "threads"}:
+        access_token = args.access_token or os.environ.get("META_ACCESS_TOKEN")
+        if not access_token:
+            raise ValueError("Missing Meta access token. Pass --access-token or set META_ACCESS_TOKEN.")
+        metrics = args.metrics or DEFAULT_GRAPH_INSIGHT_METRICS[platform]
+        return fetch_meta_graph_insights(
+            source,
+            platform=platform,
+            access_token=access_token,
+            graph_version=args.graph_version,
+            metrics=metrics,
+        )
     raise ValueError(f"Unsupported API platform: {args.platform}")
 
 
@@ -1929,11 +1995,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     add_common(fetch_metrics)
     fetch_metrics.add_argument("sources", nargs="*", help="URLs or platform IDs/URNs.")
     fetch_metrics.add_argument("--input", type=Path, action="append", help="TXT or CSV with url,format_hint,notes columns.")
-    fetch_metrics.add_argument("--platform", required=True, choices=["youtube", "x", "twitter", "linkedin"])
+    fetch_metrics.add_argument("--platform", required=True, choices=["youtube", "x", "twitter", "linkedin", "instagram", "facebook", "threads"])
     fetch_metrics.add_argument("--api-key", help="YouTube API key. Defaults to YOUTUBE_API_KEY.")
     fetch_metrics.add_argument("--bearer-token", help="X bearer token. Defaults to X_BEARER_TOKEN.")
-    fetch_metrics.add_argument("--access-token", help="LinkedIn access token. Defaults to LINKEDIN_ACCESS_TOKEN.")
+    fetch_metrics.add_argument("--access-token", help="LinkedIn or Meta access token. Defaults to LINKEDIN_ACCESS_TOKEN or META_ACCESS_TOKEN.")
     fetch_metrics.add_argument("--restli-protocol-version", default="2.0.0")
+    fetch_metrics.add_argument("--graph-version", default="v24.0")
+    fetch_metrics.add_argument("--metrics", help="Comma-separated Meta Graph insight metrics override.")
     fetch_metrics.set_defaults(func=cmd_fetch_metrics)
 
     report = sub.add_parser("report", help="Rank pieces by platform-native metrics.")

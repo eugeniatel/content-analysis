@@ -198,6 +198,10 @@ Supported API fetchers:
 - LinkedIn: `--platform linkedin`, using `--access-token` or
   `LINKEDIN_ACCESS_TOKEN`. Fetches `socialActions` aggregate counts for an
   activity URN.
+- Instagram/Facebook/Threads: `--platform instagram|facebook|threads`, using
+  `--access-token` or `META_ACCESS_TOKEN`. Fetches Graph API insights for an
+  explicit object/media ID. Public URLs are rejected because they do not
+  reliably contain the API object ID.
 
 The CLI does not store tokens, does not auto-extract browser cookies, and logs
 per-source API failures to `failures`.

@@ -22,13 +22,13 @@ analysis features.
 
 | Plataforma | Formatos | Estado |
 | --- | --- | --- |
-| Instagram | Reels, carousels | Cubierto |
+| Instagram | Reels, carousels | Media cubierto; metricas via Graph API con media ID |
 | TikTok | Videos | Cubierto |
 | Local files | Videos, audios, imagenes | Cubierto como fallback/manual |
 | X/Twitter | Posts | Metricas via API; media no cubierto |
 | LinkedIn | Posts | Metricas via API; media no cubierto |
 | YouTube Shorts | Shorts/video | Media via `yt-dlp`; metricas via API |
-| Facebook/Threads | Posts/video | No cubierto |
+| Facebook/Threads | Posts/video | Metricas via Graph API con object ID |
 
 ## Platform Metric Priorities
 
@@ -46,6 +46,8 @@ also have a primary metric that reflects what the platform tends to reward.
 
 - Descarga media y metadata con `yt-dlp` y `gallery-dl`.
 - Trae metricas via APIs autenticadas para YouTube, X/Twitter y LinkedIn.
+- Trae insights via Meta Graph API para Instagram, Facebook y Threads cuando se
+  provee el object/media ID correspondiente.
 - Acepta URLs, TXT, CSV y archivos locales.
 - Importa CSVs manuales de metricas para plataformas todavia no cubiertas por
   descarga automatica, incluyendo headers comunes de exports como
@@ -215,6 +217,12 @@ X_BEARER_TOKEN=... content-reference fetch-metrics \
 LINKEDIN_ACCESS_TOKEN=... content-reference fetch-metrics \
   --platform linkedin \
   "https://www.linkedin.com/feed/update/urn:li:activity:1234567890/" \
+  --output-root references
+
+META_ACCESS_TOKEN=... content-reference fetch-metrics \
+  --platform instagram \
+  17895695668004550 \
+  --metrics reach,plays,saved,shares \
   --output-root references
 ```
 

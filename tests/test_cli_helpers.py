@@ -350,3 +350,49 @@ def test_fetch_linkedin_metrics_maps_social_actions():
     assert row["likes"] == "11"
     assert row["comments"] == "6"
     assert row["reposts"] == "2"
+
+
+def test_fetch_meta_graph_insights_maps_instagram_metrics():
+    def fake_get(url, **kwargs):
+        assert "graph.facebook.com/v24.0/1789/insights" in url
+        assert "metric=reach%2Cplays%2Csaved%2Cshares" in url
+        return {
+            "data": [
+                {"name": "reach", "values": [{"value": 1000}]},
+                {"name": "plays", "values": [{"value": 1400}]},
+                {"name": "saved", "values": [{"value": 50}]},
+                {"name": "shares", "values": [{"value": 20}]},
+            ]
+        }
+
+    row = cli.fetch_meta_graph_insights(
+        "1789",
+        platform="instagram",
+        access_token="token",
+        graph_version="v24.0",
+        metrics="reach,plays,saved,shares",
+        http_get=fake_get,
+    )
+
+    assert row["platform"] == "instagram"
+    assert row["reach"] == "1000"
+    assert row["plays"] == "1400"
+    assert row["saves"] == "50"
+    assert row["shares"] == "20"
+    assert row["metric_source"] == "instagram_graph_api"
+
+
+def test_fetch_meta_graph_insights_requires_object_id():
+    try:
+        cli.fetch_meta_graph_insights(
+            "https://www.instagram.com/reel/abc/",
+            platform="instagram",
+            access_token="token",
+            graph_version="v24.0",
+            metrics="reach",
+            http_get=lambda *a, **k: {},
+        )
+    except ValueError as exc:
+        assert "object/media ID" in str(exc)
+    else:
+        raise AssertionError("Expected public URL to be rejected")
