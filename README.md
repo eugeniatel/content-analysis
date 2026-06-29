@@ -47,7 +47,9 @@ also have a primary metric that reflects what the platform tends to reward.
 - Descarga media y metadata con `yt-dlp` y `gallery-dl`.
 - Acepta URLs, TXT, CSV y archivos locales.
 - Importa CSVs manuales de metricas para plataformas todavia no cubiertas por
-  descarga automatica.
+  descarga automatica, incluyendo headers comunes de exports como
+  `Average Percentage Watched`, `Watched Full Video`, `Share Count`,
+  `Engagement Rate` o `Post URL`.
 - Extrae audio con `ffmpeg`.
 - Transcribe videos con `faster-whisper` o Whisper CLI.
 - Extrae texto en pantalla con EasyOCR o Tesseract.
@@ -65,6 +67,7 @@ also have a primary metric that reflects what the platform tends to reward.
   `metric_confidence` y `metrics_captured_at`.
 - Genera reportes rankeados por metrica primaria, engagement rate o
   interacciones.
+- Analiza performance por formato, hook visual, hook hablado y CTA hablado.
 - Registra fallas por URL sin cortar todo el batch.
 
 ## Pipeline
@@ -208,6 +211,15 @@ Check corpus coverage:
 
 ```bash
 content-reference coverage --output-root references
+```
+
+Analyze creative patterns:
+
+```bash
+content-reference analyze \
+  --platform tiktok \
+  --min-count 2 \
+  --output-root references
 ```
 
 ## Data Model

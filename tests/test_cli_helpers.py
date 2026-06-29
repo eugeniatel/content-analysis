@@ -181,6 +181,7 @@ def test_metric_template_outputs_linkedin_csv():
     assert rows[0]["engagement_rate"] == "5.5%"
     assert "comments" in rows[0]
     assert "reposts" in rows[0]
+    assert "hook_onscreen" in rows[0]
 
 
 def test_metric_template_rejects_unknown_platform():
@@ -220,3 +221,62 @@ def test_coverage_report_summarizes_platforms_and_metric_sources(tmp_path):
     assert platforms["linkedin"]["with_native_primary_metric"] == 1
     assert platforms["linkedin"]["metric_sources"]["manual_csv"] == 1
     assert platforms["tiktok"]["formats"]["tiktok"] == 1
+
+
+def test_import_metrics_canonicalizes_export_headers(tmp_path):
+    output_root = tmp_path / "references"
+    con = cli.connect(output_root)
+
+    cli.import_metric_row(
+        con,
+        output_root=output_root,
+        row={
+            "Post URL": "https://www.instagram.com/reel/abc/",
+            "Average Percentage Watched": "38%",
+            "Share Count": "1,200",
+            "Save Count": "300",
+            "Visual Hook": "3 signos con suerte",
+            "Spoken CTA": "guardalo para despues",
+        },
+    )
+
+    row = con.execute("SELECT * FROM pieces").fetchone()
+    assert row["platform"] == "instagram"
+    assert row["primary_metric_name"] == "retention_rate"
+    assert row["primary_metric_value"] == 0.38
+    assert row["shares"] == 1200
+    assert row["hook_onscreen"] == "3 signos con suerte"
+    assert row["cta_spoken"] == "guardalo para despues"
+
+
+def test_analytics_report_groups_by_format_hook_and_cta(tmp_path):
+    output_root = tmp_path / "references"
+    con = cli.connect(output_root)
+    cli.import_metric_row(
+        con,
+        output_root=output_root,
+        row={
+            "url": "https://www.tiktok.com/@x/video/1",
+            "completion_rate": "40%",
+            "hook_onscreen": "hook A",
+            "cta_spoken": "comment below",
+        },
+    )
+    cli.import_metric_row(
+        con,
+        output_root=output_root,
+        row={
+            "url": "https://www.tiktok.com/@x/video/2",
+            "completion_rate": "80%",
+            "hook_onscreen": "hook A",
+            "cta_spoken": "comment below",
+        },
+    )
+
+    report = cli.analytics_report(con, platform="tiktok", min_count=2)
+
+    assert report["usable_rows"] == 2
+    assert report["formats"][0]["key"] == "tiktok"
+    assert round(report["formats"][0]["avg_metric"], 3) == 0.6
+    assert report["hook_onscreen"][0]["key"] == "hook A"
+    assert report["cta_spoken"][0]["key"] == "comment below"

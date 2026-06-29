@@ -50,6 +50,16 @@ include:
   `retention_rate`, `engagement_rate`.
 - `primary_metric_name`, `primary_metric_value` for explicit overrides.
 - `metric_source`, `metrics_captured_at`, `notes`.
+- `hook_onscreen`, `hook_spoken`, `cta_spoken` for manual creative analysis.
+
+Common export headers are normalized to these names. Examples:
+
+- `Post URL`, `Permalink`, `Link` -> `url`
+- `Average Percentage Watched`, `Avg % Watched` -> `retention_rate`
+- `Watched Full Video`, `Full Video Watch Rate` -> `watched_full_video_pct`
+- `Share Count`, `Reposts`, `Retweets` -> `shares` or `reposts`
+- `Visual Hook`, `On Screen Hook` -> `hook_onscreen`
+- `Spoken CTA`, `CTA` -> `cta_spoken`
 
 `metric-template <platform>` prints a CSV header plus example row for supported
 manual metric platforms.
@@ -190,6 +200,19 @@ counts, and the metric basis used for each piece.
 formats, metric sources, rows with any primary metric, rows with native primary
 metrics, and rows still missing a primary metric. Use this to keep the README
 coverage table aligned with the actual data surface as new platforms are added.
+
+## 9.4 Creative Analytics
+
+`analyze` groups rows by:
+
+- `format`
+- `hook_onscreen`
+- `hook_spoken`
+- `cta_spoken`
+
+Each group is ranked by average primary metric, falling back to engagement rate
+or interaction count when no native primary metric exists. `--min-count` should
+be used to avoid over-reading single examples.
 
 ## 10. SQLite Schema
 

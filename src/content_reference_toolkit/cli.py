@@ -28,6 +28,67 @@ METRIC_COLUMNS = {
     "avg_watch_time", "watched_full_video_pct", "completion_rate",
     "retention_rate", "engagement_rate",
 }
+CSV_COLUMN_ALIASES = {
+    "post url": "url",
+    "permalink": "url",
+    "link": "url",
+    "content link": "url",
+    "date": "published_at",
+    "publish date": "published_at",
+    "published date": "published_at",
+    "published time": "published_at",
+    "account": "creator",
+    "author": "creator",
+    "handle": "creator",
+    "impression": "impressions",
+    "impressions": "impressions",
+    "views": "views",
+    "video views": "views",
+    "plays": "plays",
+    "reach": "reach",
+    "likes": "likes",
+    "like count": "likes",
+    "reactions": "reactions",
+    "reaction count": "reactions",
+    "comments": "comments",
+    "comment count": "comments",
+    "replies": "replies",
+    "reply count": "replies",
+    "shares": "shares",
+    "share count": "shares",
+    "reposts": "reposts",
+    "repost count": "reposts",
+    "retweets": "reposts",
+    "saves": "saves",
+    "save count": "saves",
+    "bookmarks": "bookmarks",
+    "bookmark count": "bookmarks",
+    "clicks": "clicks",
+    "link clicks": "clicks",
+    "profile clicks": "profile_clicks",
+    "profile visits": "profile_clicks",
+    "average watch time": "avg_watch_time",
+    "avg watch time": "avg_watch_time",
+    "avg_watch_time": "avg_watch_time",
+    "watched full video": "watched_full_video_pct",
+    "watched full video %": "watched_full_video_pct",
+    "full video watch rate": "watched_full_video_pct",
+    "completion rate": "completion_rate",
+    "completion rate %": "completion_rate",
+    "retention rate": "retention_rate",
+    "retention rate %": "retention_rate",
+    "average percentage watched": "retention_rate",
+    "avg % watched": "retention_rate",
+    "engagement rate": "engagement_rate",
+    "engagement rate %": "engagement_rate",
+    "hook": "hook_onscreen",
+    "visual hook": "hook_onscreen",
+    "onscreen hook": "hook_onscreen",
+    "on screen hook": "hook_onscreen",
+    "spoken hook": "hook_spoken",
+    "cta": "cta_spoken",
+    "spoken cta": "cta_spoken",
+}
 PRIMARY_METRIC_BY_PLATFORM = {
     "x": ("comments", ("comments", "replies")),
     "twitter": ("comments", ("comments", "replies")),
@@ -38,29 +99,33 @@ PRIMARY_METRIC_BY_PLATFORM = {
 METRIC_TEMPLATES = {
     "x": [
         "url", "platform", "published_at", "creator", "impressions", "likes",
-        "replies", "reposts", "bookmarks", "profile_clicks", "notes",
+        "replies", "reposts", "bookmarks", "profile_clicks", "hook_onscreen",
+        "cta_spoken", "notes",
     ],
     "twitter": [
         "url", "platform", "published_at", "creator", "impressions", "likes",
-        "replies", "reposts", "bookmarks", "profile_clicks", "notes",
+        "replies", "reposts", "bookmarks", "profile_clicks", "hook_onscreen",
+        "cta_spoken", "notes",
     ],
     "linkedin": [
         "url", "platform", "published_at", "creator", "impressions",
         "reactions", "comments", "reposts", "clicks", "engagement_rate",
-        "notes",
+        "hook_onscreen", "cta_spoken", "notes",
     ],
     "tiktok": [
         "url", "platform", "published_at", "creator", "views", "likes",
         "comments", "shares", "avg_watch_time", "watched_full_video_pct",
-        "completion_rate", "notes",
+        "completion_rate", "hook_onscreen", "hook_spoken", "cta_spoken", "notes",
     ],
     "instagram": [
         "url", "platform", "published_at", "creator", "reach", "plays",
-        "likes", "comments", "shares", "saves", "retention_rate", "notes",
+        "likes", "comments", "shares", "saves", "retention_rate",
+        "hook_onscreen", "hook_spoken", "cta_spoken", "notes",
     ],
     "youtube": [
         "url", "platform", "published_at", "creator", "views", "likes",
-        "comments", "shares", "avg_watch_time", "retention_rate", "notes",
+        "comments", "shares", "avg_watch_time", "retention_rate",
+        "hook_onscreen", "hook_spoken", "cta_spoken", "notes",
     ],
 }
 
@@ -137,6 +202,10 @@ def rel(path: Path, root: Path) -> str:
 def parse_int(value: Any) -> int | None:
     if value is None:
         return None
+    if isinstance(value, str):
+        value = value.strip().replace(",", "").replace(" ", "")
+        if not value:
+            return None
     try:
         return int(value)
     except (TypeError, ValueError):
@@ -147,7 +216,7 @@ def parse_float(value: Any) -> float | None:
     if value is None:
         return None
     if isinstance(value, str):
-        value = value.strip().replace("%", "")
+        value = value.strip().replace("%", "").replace(",", "")
         if not value:
             return None
     try:
@@ -164,6 +233,24 @@ def json_loads(value: str | None) -> Any:
     if not value:
         return None
     return json.loads(value)
+
+
+def canonical_column_name(value: str) -> str:
+    normalized = " ".join(value.strip().replace("_", " ").split()).lower()
+    return CSV_COLUMN_ALIASES.get(normalized, normalized.replace(" ", "_"))
+
+
+def canonicalize_row(row: dict[str, Any]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for key, value in row.items():
+        if key is None:
+            continue
+        canonical = canonical_column_name(str(key))
+        text = "" if value is None else str(value).strip()
+        if canonical in out and out[canonical]:
+            continue
+        out[canonical] = text
+    return out
 
 
 def duration_bucket(format_: str, duration_sec: float | None) -> str:
@@ -1219,6 +1306,68 @@ def coverage_report(con: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
+def compact_text(value: str | None, *, limit: int = 120) -> str:
+    text = " ".join((value or "").split())
+    if not text:
+        return "unknown"
+    return text if len(text) <= limit else text[: limit - 3].rstrip() + "..."
+
+
+def avg(values: list[float]) -> float | None:
+    return sum(values) / len(values) if values else None
+
+
+def analytics_bucket(rows: list[sqlite3.Row], key_fn: Any, *, min_count: int) -> list[dict[str, Any]]:
+    buckets: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = key_fn(row)
+        bucket = buckets.setdefault(key, {"key": key, "count": 0, "values": [], "examples": []})
+        bucket["count"] += 1
+        value = metric_sort_value(row)
+        if value >= 0:
+            bucket["values"].append(value)
+        if len(bucket["examples"]) < 3:
+            bucket["examples"].append({
+                "source_url": row["source_url"],
+                "platform": row["platform"],
+                "primary_metric_name": row["primary_metric_name"],
+                "primary_metric_value": row["primary_metric_value"],
+            })
+    out = []
+    for bucket in buckets.values():
+        if bucket["count"] < min_count:
+            continue
+        out.append({
+            "key": bucket["key"],
+            "count": bucket["count"],
+            "avg_metric": avg(bucket["values"]),
+            "examples": bucket["examples"],
+        })
+    return sorted(out, key=lambda item: (item["avg_metric"] is not None, item["avg_metric"] or -1, item["count"]), reverse=True)
+
+
+def analytics_report(con: sqlite3.Connection, *, platform: str | None = None, min_count: int = 1, limit: int = 10) -> dict[str, Any]:
+    params: list[Any] = []
+    where = ""
+    if platform:
+        where = "WHERE platform = ?"
+        params.append(platform)
+    rows = con.execute(f"SELECT * FROM pieces {where} ORDER BY collected_at DESC, id", params).fetchall()
+    usable = [row for row in rows if metric_sort_value(row) >= 0]
+    return {
+        "status": "done",
+        "platform": platform,
+        "total_rows": len(rows),
+        "usable_rows": len(usable),
+        "min_count": min_count,
+        "ranked_by": "average primary metric, falling back to engagement/interactions",
+        "formats": analytics_bucket(usable, lambda row: row["format"] or "unknown", min_count=min_count)[:limit],
+        "hook_onscreen": analytics_bucket(usable, lambda row: compact_text(row["hook_onscreen"]), min_count=min_count)[:limit],
+        "hook_spoken": analytics_bucket(usable, lambda row: compact_text(row["hook_spoken"]), min_count=min_count)[:limit],
+        "cta_spoken": analytics_bucket(usable, lambda row: compact_text(row["cta_spoken"]), min_count=min_count)[:limit],
+    }
+
+
 def metric_template(platform: str, *, include_example: bool = True) -> str:
     platform_key = platform.lower()
     columns = METRIC_TEMPLATES.get(platform_key)
@@ -1232,6 +1381,9 @@ def metric_template(platform: str, *, include_example: bool = True) -> str:
         example["platform"] = "x" if platform_key == "twitter" else platform_key
         example["published_at"] = "2026-06-29"
         example["creator"] = "example_creator"
+        example["hook_onscreen"] = "example opening hook"
+        example["hook_spoken"] = "example spoken hook"
+        example["cta_spoken"] = "example CTA"
         example["notes"] = "why this post matters"
         if platform_key in {"x", "twitter"}:
             example.update({"impressions": "1000", "likes": "25", "replies": "8", "reposts": "4", "bookmarks": "12"})
@@ -1263,13 +1415,15 @@ def read_metric_rows(path: Path) -> list[dict[str, str]]:
         reader = csv.DictReader(fh)
         rows = []
         for row in reader:
-            source = (first_present(row, "source_url", "url") or "").strip()
+            normalized = canonicalize_row(row)
+            source = (first_present(normalized, "source_url", "url") or "").strip()
             if source:
-                rows.append({key: (value or "").strip() for key, value in row.items() if key})
+                rows.append(normalized)
         return rows
 
 
 def import_metric_row(con: sqlite3.Connection, *, output_root: Path, row: dict[str, str]) -> dict[str, Any]:
+    row = canonicalize_row(row)
     source = first_present(row, "source_url", "url")
     if not source:
         return {"status": "skipped", "error": "missing source_url/url"}
@@ -1286,6 +1440,9 @@ def import_metric_row(con: sqlite3.Connection, *, output_root: Path, row: dict[s
     shares = parse_int(first_present(row, "shares", "reposts"))
     views = parse_int(first_present(row, "views", "plays"))
     metrics = numeric_metrics(row)
+    for key, value in (("likes", likes), ("comments", comments), ("shares", shares), ("views", views)):
+        if value is not None:
+            metrics.setdefault(key, float(value))
     present_interactions = [v for v in (likes, comments, shares) if v is not None]
     interaction_count = sum(present_interactions) if present_interactions else None
     explicit_engagement_rate = normalize_metric_rate(parse_float(first_present(row, "engagement_rate")))
@@ -1347,13 +1504,16 @@ def import_metric_row(con: sqlite3.Connection, *, output_root: Path, row: dict[s
             primary_metric_basis, secondary_metrics, metric_source, metric_confidence,
             metrics_captured_at, notes, collected_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             platform=excluded.platform,
             format=excluded.format,
             creator=COALESCE(excluded.creator, pieces.creator),
             published_at=COALESCE(excluded.published_at, pieces.published_at),
             caption=COALESCE(excluded.caption, pieces.caption),
+            hook_spoken=COALESCE(excluded.hook_spoken, pieces.hook_spoken),
+            hook_onscreen=COALESCE(excluded.hook_onscreen, pieces.hook_onscreen),
+            cta_spoken=COALESCE(excluded.cta_spoken, pieces.cta_spoken),
             views=excluded.views,
             likes=excluded.likes,
             comments=excluded.comments,
@@ -1381,6 +1541,9 @@ def import_metric_row(con: sqlite3.Connection, *, output_root: Path, row: dict[s
             parse_float(first_present(row, "duration_sec", "duration")),
             duration_bucket(format_, parse_float(first_present(row, "duration_sec", "duration"))),
             first_present(row, "caption", "text"),
+            first_present(row, "hook_spoken") or None,
+            first_present(row, "hook_onscreen") or None,
+            first_present(row, "cta_spoken") or None,
             views,
             likes,
             comments,
@@ -1508,6 +1671,13 @@ def cmd_coverage(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_analyze(args: argparse.Namespace) -> int:
+    output_root = args.output_root.resolve()
+    con = connect(output_root)
+    print_summary(analytics_report(con, platform=args.platform, min_count=args.min_count, limit=args.limit))
+    return 0
+
+
 def cmd_metric_template(args: argparse.Namespace) -> int:
     try:
         sys.stdout.write(metric_template(args.platform, include_example=not args.header_only))
@@ -1594,6 +1764,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     coverage = sub.add_parser("coverage", help="Summarize corpus platform and metric coverage.")
     add_common(coverage)
     coverage.set_defaults(func=cmd_coverage)
+
+    analyze = sub.add_parser("analyze", help="Analyze performance by format, hooks, and CTA.")
+    add_common(analyze)
+    analyze.add_argument("--platform", help="Optional platform filter, e.g. instagram, tiktok, linkedin, x.")
+    analyze.add_argument("--min-count", type=int, default=1)
+    analyze.add_argument("--limit", type=int, default=10)
+    analyze.set_defaults(func=cmd_analyze)
 
     template = sub.add_parser("metric-template", help="Print a platform-specific manual metrics CSV template.")
     template.add_argument("platform", help="x, linkedin, tiktok, instagram, youtube.")
