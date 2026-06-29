@@ -190,3 +190,33 @@ def test_metric_template_rejects_unknown_platform():
         assert "unknown platform" in str(exc)
     else:
         raise AssertionError("Expected unknown platform to raise ValueError")
+
+
+def test_coverage_report_summarizes_platforms_and_metric_sources(tmp_path):
+    output_root = tmp_path / "references"
+    con = cli.connect(output_root)
+    cli.import_metric_row(
+        con,
+        output_root=output_root,
+        row={
+            "url": "https://www.linkedin.com/feed/update/urn:li:activity:123/",
+            "engagement_rate": "5.5%",
+        },
+    )
+    cli.import_metric_row(
+        con,
+        output_root=output_root,
+        row={
+            "url": "https://www.tiktok.com/@x/video/1",
+            "completion_rate": "75%",
+        },
+    )
+
+    report = cli.coverage_report(con)
+
+    assert report["total_rows"] == 2
+    platforms = {row["platform"]: row for row in report["platforms"]}
+    assert platforms["linkedin"]["rows"] == 1
+    assert platforms["linkedin"]["with_native_primary_metric"] == 1
+    assert platforms["linkedin"]["metric_sources"]["manual_csv"] == 1
+    assert platforms["tiktok"]["formats"]["tiktok"] == 1

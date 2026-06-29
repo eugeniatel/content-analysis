@@ -204,6 +204,12 @@ content-reference report \
   --output-root references
 ```
 
+Check corpus coverage:
+
+```bash
+content-reference coverage --output-root references
+```
+
 ## Data Model
 
 Normalized rows live in SQLite table `pieces` and export to JSONL with:

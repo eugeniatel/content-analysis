@@ -184,6 +184,13 @@ If the primary metric is unavailable, Statool falls back to derived
 It emits one JSON object with the ranked items, optional platform filter, row
 counts, and the metric basis used for each piece.
 
+## 9.3 Coverage Report
+
+`coverage` summarizes the current corpus by platform. It reports row counts,
+formats, metric sources, rows with any primary metric, rows with native primary
+metrics, and rows still missing a primary metric. Use this to keep the README
+coverage table aligned with the actual data surface as new platforms are added.
+
 ## 10. SQLite Schema
 
 Table `pieces`:

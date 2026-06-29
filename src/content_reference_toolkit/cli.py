@@ -1182,6 +1182,43 @@ def metric_report(con: sqlite3.Connection, *, platform: str | None = None, limit
     }
 
 
+def coverage_report(con: sqlite3.Connection) -> dict[str, Any]:
+    rows = con.execute("SELECT * FROM pieces ORDER BY platform, format, id").fetchall()
+    platforms: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        platform = row["platform"] or "unknown"
+        bucket = platforms.setdefault(
+            platform,
+            {
+                "platform": platform,
+                "rows": 0,
+                "formats": {},
+                "with_primary_metric": 0,
+                "with_native_primary_metric": 0,
+                "missing_primary_metric": 0,
+                "metric_sources": {},
+            },
+        )
+        bucket["rows"] += 1
+        format_ = row["format"] or "unknown"
+        bucket["formats"][format_] = bucket["formats"].get(format_, 0) + 1
+        metric_source = row["metric_source"] or "none"
+        bucket["metric_sources"][metric_source] = bucket["metric_sources"].get(metric_source, 0) + 1
+        if row["primary_metric_value"] is not None:
+            bucket["with_primary_metric"] += 1
+            if row["metric_confidence"] == "native":
+                bucket["with_native_primary_metric"] += 1
+        else:
+            bucket["missing_primary_metric"] += 1
+
+    platform_rows = sorted(platforms.values(), key=lambda item: (-item["rows"], item["platform"]))
+    return {
+        "status": "done",
+        "total_rows": len(rows),
+        "platforms": platform_rows,
+    }
+
+
 def metric_template(platform: str, *, include_example: bool = True) -> str:
     platform_key = platform.lower()
     columns = METRIC_TEMPLATES.get(platform_key)
@@ -1464,6 +1501,13 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_coverage(args: argparse.Namespace) -> int:
+    output_root = args.output_root.resolve()
+    con = connect(output_root)
+    print_summary(coverage_report(con))
+    return 0
+
+
 def cmd_metric_template(args: argparse.Namespace) -> int:
     try:
         sys.stdout.write(metric_template(args.platform, include_example=not args.header_only))
@@ -1546,6 +1590,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     report.add_argument("--platform", help="Optional platform filter, e.g. instagram, tiktok, linkedin, x.")
     report.add_argument("--limit", type=int, default=10)
     report.set_defaults(func=cmd_report)
+
+    coverage = sub.add_parser("coverage", help="Summarize corpus platform and metric coverage.")
+    add_common(coverage)
+    coverage.set_defaults(func=cmd_coverage)
 
     template = sub.add_parser("metric-template", help="Print a platform-specific manual metrics CSV template.")
     template.add_argument("platform", help="x, linkedin, tiktok, instagram, youtube.")
