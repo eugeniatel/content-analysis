@@ -1,22 +1,23 @@
-# Content Reference Toolkit
+# Statool
 
-Open-source local pipeline for collecting short-form social references and
-turning them into a structured corpus for later writing-guideline generation.
+Statool is an open-source local CLI for researching social profiles, collecting
+short-form social references, importing platform metrics, and turning all of it
+into a structured corpus for content analysis.
 
-Primary use case: astrology content in Spanish for LATAM/Argentina, with
-Instagram Reels, Instagram carousels, and TikTok videos as inputs.
+The core user flow is link-first: share a social profile or website URL, let
+Statool find the relevant social profiles/content, then choose whether to use
+official APIs, analytics exports, best-effort scraping, or manual metric input.
 
-The toolkit does **not** generate guidelines itself. It prepares clean,
-queryable data that an LLM can read later.
+The CLI command is `content-reference`. The tool prepares clean, queryable data
+that an LLM or later reporting layer can read; it does not generate final
+content guidelines itself.
 
 ## What Is Statool?
 
-Statool is the working product direction for this repository: a local,
-cross-platform social content analysis tool. Today it is implemented as the
-`content-reference` CLI, focused on collecting content references and turning
-them into a clean corpus for later analysis. As the project expands, this README
-should be updated to reflect the current platform coverage, metrics, and
-analysis features.
+Statool is the product direction for this repository: a local, cross-platform
+social content analysis tool implemented today as the `content-reference` CLI.
+As the project expands, this README should be updated to reflect current
+platform coverage, metrics, and analysis features.
 
 ## Platform Coverage
 
@@ -95,7 +96,7 @@ references/
 ## Install
 
 ```bash
-cd /Users/euge/content-reference-toolkit
+cd /Users/euge/content-analysis
 python3 -m venv .venv
 .venv/bin/python -m pip install -e ".[dev]"
 ```
@@ -172,26 +173,26 @@ From `eugeniatel`:
 
 ```bash
 cd /Users/euge/eugeniatel
-/Users/euge/content-reference-toolkit/.venv/bin/content-reference collect \
+/Users/euge/content-analysis/.venv/bin/content-reference collect \
   --input references/examples.csv \
   --output-root references
 
-/Users/euge/content-reference-toolkit/.venv/bin/content-reference extract \
+/Users/euge/content-analysis/.venv/bin/content-reference extract \
   --output-root references \
   --whisper-language es \
   --ocr-languages es,pt,en
 
-/Users/euge/content-reference-toolkit/.venv/bin/content-reference normalize \
+/Users/euge/content-analysis/.venv/bin/content-reference normalize \
   --output-root references
 
-/Users/euge/content-reference-toolkit/.venv/bin/content-reference export \
+/Users/euge/content-analysis/.venv/bin/content-reference export \
   --output-root references
 ```
 
 All stages at once:
 
 ```bash
-/Users/euge/content-reference-toolkit/.venv/bin/content-reference run \
+/Users/euge/content-analysis/.venv/bin/content-reference run \
   --input references/examples.csv \
   --output-root references \
   --export
@@ -200,12 +201,12 @@ All stages at once:
 Local carousel screenshots:
 
 ```bash
-/Users/euge/content-reference-toolkit/.venv/bin/content-reference collect \
+/Users/euge/content-analysis/.venv/bin/content-reference collect \
   ~/Downloads/carousel-slides/ \
   --output-root references \
   --notes "Lu Gaitan carousel reference"
 
-/Users/euge/content-reference-toolkit/.venv/bin/content-reference extract \
+/Users/euge/content-analysis/.venv/bin/content-reference extract \
   --output-root references
 ```
 
