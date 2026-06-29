@@ -396,3 +396,38 @@ def test_fetch_meta_graph_insights_requires_object_id():
         assert "object/media ID" in str(exc)
     else:
         raise AssertionError("Expected public URL to be rejected")
+
+
+def test_connector_options_and_setup_connector_describe_modes():
+    options = cli.connector_options("x")
+
+    assert options["status"] == "done"
+    assert "api" in options["modes"]
+    assert "scrape" in options["modes"]
+
+    setup = cli.setup_connector("x", "api")
+    assert setup["requires"] == ["X_BEARER_TOKEN"]
+    assert setup["command"] == "fetch-metrics --platform x"
+
+
+def test_metric_row_from_metadata_maps_yt_dlp_fields():
+    row = cli.metric_row_from_metadata(
+        "https://www.tiktok.com/@x/video/1",
+        {
+            "uploader": "creator",
+            "timestamp": 1782720000,
+            "duration": 18,
+            "description": "caption",
+            "view_count": 1000,
+            "like_count": 90,
+            "comment_count": 7,
+            "share_count": 4,
+        },
+        metric_source="scrape_yt_dlp",
+    )
+
+    assert row["platform"] == "tiktok"
+    assert row["format"] == "tiktok"
+    assert row["creator"] == "creator"
+    assert row["views"] == "1000"
+    assert row["metric_source"] == "scrape_yt_dlp"

@@ -226,6 +226,28 @@ META_ACCESS_TOKEN=... content-reference fetch-metrics \
   --output-root references
 ```
 
+Choose an acquisition mode:
+
+```bash
+content-reference connector-options linkedin
+content-reference setup-connector linkedin --mode api
+content-reference setup-connector linkedin --mode scrape
+```
+
+Low-cost best-effort scraping:
+
+```bash
+content-reference scrape-metrics \
+  --platform tiktok \
+  "https://www.tiktok.com/@user/video/1234567890" \
+  --output-root references
+```
+
+`scrape-metrics` uses public metadata tooling and only uses cookies when an
+explicit `--cookies cookies.txt` file is supplied. It marks rows as
+`metric_source=scrape_yt_dlp`, so scraped metrics stay separate from API and
+export data.
+
 Rank content by platform-native metrics:
 
 ```bash

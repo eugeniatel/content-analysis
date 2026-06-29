@@ -137,6 +137,61 @@ DEFAULT_GRAPH_INSIGHT_METRICS = {
     "facebook": "post_impressions,post_engaged_users,post_clicks",
     "threads": "views,likes,replies,reposts,quotes,shares",
 }
+CONNECTORS = {
+    "youtube": {
+        "modes": {
+            "api": {"command": "fetch-metrics --platform youtube", "requires": ["YOUTUBE_API_KEY"], "quality": "best"},
+            "scrape": {"command": "scrape-metrics --platform youtube", "requires": ["yt-dlp"], "quality": "best_effort"},
+            "export": {"command": "import-metrics --input metrics.csv", "requires": ["YouTube Studio export"], "quality": "good"},
+            "manual": {"command": "metric-template youtube", "requires": [], "quality": "manual"},
+        },
+    },
+    "x": {
+        "modes": {
+            "api": {"command": "fetch-metrics --platform x", "requires": ["X_BEARER_TOKEN"], "quality": "best"},
+            "scrape": {"command": "scrape-metrics --platform x", "requires": ["yt-dlp", "optional cookies.txt"], "quality": "best_effort"},
+            "export": {"command": "import-metrics --input metrics.csv", "requires": ["X analytics export"], "quality": "good"},
+            "manual": {"command": "metric-template x", "requires": [], "quality": "manual"},
+        },
+    },
+    "linkedin": {
+        "modes": {
+            "api": {"command": "fetch-metrics --platform linkedin", "requires": ["LINKEDIN_ACCESS_TOKEN"], "quality": "best"},
+            "scrape": {"command": "scrape-metrics --platform linkedin", "requires": ["yt-dlp if supported", "optional cookies.txt"], "quality": "fragile"},
+            "export": {"command": "import-metrics --input metrics.csv", "requires": ["LinkedIn analytics export"], "quality": "good"},
+            "manual": {"command": "metric-template linkedin", "requires": [], "quality": "manual"},
+        },
+    },
+    "tiktok": {
+        "modes": {
+            "scrape": {"command": "scrape-metrics --platform tiktok", "requires": ["yt-dlp", "optional cookies.txt"], "quality": "best_effort"},
+            "export": {"command": "import-metrics --input metrics.csv", "requires": ["TikTok analytics export"], "quality": "best"},
+            "manual": {"command": "metric-template tiktok", "requires": [], "quality": "manual"},
+        },
+    },
+    "instagram": {
+        "modes": {
+            "api": {"command": "fetch-metrics --platform instagram", "requires": ["META_ACCESS_TOKEN", "media ID"], "quality": "best"},
+            "scrape": {"command": "scrape-metrics --platform instagram", "requires": ["yt-dlp", "optional cookies.txt"], "quality": "best_effort"},
+            "export": {"command": "import-metrics --input metrics.csv", "requires": ["Instagram insights export"], "quality": "good"},
+            "manual": {"command": "metric-template instagram", "requires": [], "quality": "manual"},
+        },
+    },
+    "facebook": {
+        "modes": {
+            "api": {"command": "fetch-metrics --platform facebook", "requires": ["META_ACCESS_TOKEN", "object ID"], "quality": "best"},
+            "scrape": {"command": "scrape-metrics --platform facebook", "requires": ["yt-dlp if supported", "optional cookies.txt"], "quality": "fragile"},
+            "export": {"command": "import-metrics --input metrics.csv", "requires": ["Meta export"], "quality": "good"},
+        },
+    },
+    "threads": {
+        "modes": {
+            "api": {"command": "fetch-metrics --platform threads", "requires": ["META_ACCESS_TOKEN", "object ID"], "quality": "best"},
+            "scrape": {"command": "scrape-metrics --platform threads", "requires": ["yt-dlp if supported", "optional cookies.txt"], "quality": "fragile"},
+            "export": {"command": "import-metrics --input metrics.csv", "requires": ["Threads/Meta export"], "quality": "good"},
+        },
+    },
+}
 
 
 def utc_now() -> str:
@@ -1452,6 +1507,55 @@ def metric_template(platform: str, *, include_example: bool = True) -> str:
     return out.getvalue()
 
 
+def connector_options(platform: str | None = None) -> dict[str, Any]:
+    if platform:
+        key = platform.lower()
+        if key == "twitter":
+            key = "x"
+        if key not in CONNECTORS:
+            return {"status": "error", "error": f"unknown platform: {platform}", "platforms": sorted(CONNECTORS)}
+        return {"status": "done", "platform": key, "modes": CONNECTORS[key]["modes"]}
+    return {"status": "done", "platforms": sorted(CONNECTORS), "connectors": CONNECTORS}
+
+
+def setup_connector(platform: str, mode: str) -> dict[str, Any]:
+    options = connector_options(platform)
+    if options.get("status") != "done":
+        return options
+    modes = options["modes"]
+    if mode not in modes:
+        return {"status": "error", "error": f"unsupported mode '{mode}' for {options['platform']}", "available_modes": sorted(modes)}
+    selected = modes[mode]
+    return {
+        "status": "done",
+        "platform": options["platform"],
+        "mode": mode,
+        "quality": selected["quality"],
+        "requires": selected["requires"],
+        "command": selected["command"],
+        "notes": "Secrets should be passed through env vars or flags; Statool does not store tokens or auto-extract browser cookies.",
+    }
+
+
+def metric_row_from_metadata(source: str, metadata: dict[str, Any], *, platform: str | None = None, metric_source: str = "scrape_yt_dlp") -> dict[str, str]:
+    platform = platform or platform_for_source(source)
+    row: dict[str, str] = {
+        "url": source,
+        "platform": platform,
+        "format": infer_format(source, None),
+        "creator": str(metadata_value(metadata, "uploader", "channel", "creator") or ""),
+        "published_at": published_at_from_metadata(metadata) or "",
+        "duration_sec": str(metadata_value(metadata, "duration") or ""),
+        "caption": str(metadata_value(metadata, "description", "title") or ""),
+        "views": str(metadata_value(metadata, "view_count", "play_count") or ""),
+        "likes": str(metadata_value(metadata, "like_count") or ""),
+        "comments": str(metadata_value(metadata, "comment_count") or ""),
+        "shares": str(metadata_value(metadata, "repost_count", "share_count") or ""),
+        "metric_source": metric_source,
+    }
+    return row
+
+
 def first_present(row: dict[str, Any], *keys: str) -> Any:
     for key in keys:
         value = row.get(key)
@@ -1893,6 +1997,48 @@ def cmd_fetch_metrics(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_scrape_metrics(args: argparse.Namespace) -> int:
+    output_root = args.output_root.resolve()
+    con = connect(output_root)
+    rows = load_inputs(args.input or [], args.sources or [])
+    if not rows:
+        print("No sources provided.", file=sys.stderr)
+        return 2
+    count = 0
+    for item in rows:
+        source = item["url"]
+        try:
+            metadata, error = yt_dlp_metadata(source, args.cookies)
+            if error:
+                raise RuntimeError(error)
+            if not metadata:
+                raise RuntimeError("yt-dlp returned no metadata")
+            metric_row = metric_row_from_metadata(source, metadata, platform=args.platform, metric_source="scrape_yt_dlp")
+            if item.get("notes"):
+                metric_row["notes"] = item["notes"]
+            result = import_metric_row(con, output_root=output_root, row=metric_row)
+        except Exception as exc:
+            record_failure(con, source_id_=source_id(source), source_url=source, stage="scrape-metrics", message=str(exc))
+            result = {"source": source, "status": "failed", "error": str(exc)}
+        print_summary(result)
+        if result.get("status") == "done":
+            count += 1
+        if args.delay:
+            time.sleep(args.delay)
+    print_summary({"status": "done", "rows": count})
+    return 0
+
+
+def cmd_connector_options(args: argparse.Namespace) -> int:
+    print_summary(connector_options(args.platform))
+    return 0
+
+
+def cmd_setup_connector(args: argparse.Namespace) -> int:
+    print_summary(setup_connector(args.platform, args.mode))
+    return 0
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     output_root = args.output_root.resolve()
     con = connect(output_root)
@@ -2003,6 +2149,24 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     fetch_metrics.add_argument("--graph-version", default="v24.0")
     fetch_metrics.add_argument("--metrics", help="Comma-separated Meta Graph insight metrics override.")
     fetch_metrics.set_defaults(func=cmd_fetch_metrics)
+
+    scrape_metrics = sub.add_parser("scrape-metrics", help="Best-effort low-cost metric fetch using public metadata tools.")
+    add_common(scrape_metrics)
+    scrape_metrics.add_argument("sources", nargs="*", help="URLs to inspect.")
+    scrape_metrics.add_argument("--input", type=Path, action="append", help="TXT or CSV with url,format_hint,notes columns.")
+    scrape_metrics.add_argument("--platform", help="Override detected platform.")
+    scrape_metrics.add_argument("--cookies", type=Path, help="Optional explicit cookies.txt. Browser cookies are never auto-extracted.")
+    scrape_metrics.add_argument("--delay", type=float, default=4.0)
+    scrape_metrics.set_defaults(func=cmd_scrape_metrics)
+
+    connector_options_parser = sub.add_parser("connector-options", help="Show acquisition modes for one or all platforms.")
+    connector_options_parser.add_argument("platform", nargs="?")
+    connector_options_parser.set_defaults(func=cmd_connector_options)
+
+    setup_connector_parser = sub.add_parser("setup-connector", help="Show setup steps for a platform acquisition mode.")
+    setup_connector_parser.add_argument("platform")
+    setup_connector_parser.add_argument("--mode", required=True, choices=["api", "export", "scrape", "manual"])
+    setup_connector_parser.set_defaults(func=cmd_setup_connector)
 
     report = sub.add_parser("report", help="Rank pieces by platform-native metrics.")
     add_common(report)

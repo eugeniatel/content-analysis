@@ -206,6 +206,21 @@ Supported API fetchers:
 The CLI does not store tokens, does not auto-extract browser cookies, and logs
 per-source API failures to `failures`.
 
+## 9.1.2 Connector Modes
+
+`connector-options` and `setup-connector` expose the acquisition choices per
+platform:
+
+- `api`: official authenticated API, best quality, requires tokens or API keys.
+- `export`: platform analytics CSV export, stable and low risk.
+- `scrape`: public metadata extraction through local tools, best-effort and
+  fragile.
+- `manual`: generated template filled by the operator.
+
+`scrape-metrics` is deliberately separate from `fetch-metrics`. It uses
+`yt-dlp` metadata and optional explicit `--cookies cookies.txt`; it does not
+auto-extract browser cookies. Scraped rows use `metric_source=scrape_yt_dlp`.
+
 ## 9.2 Metrics Report
 
 `report` ranks normalized rows by the most actionable available signal:
