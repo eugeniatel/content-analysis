@@ -22,13 +22,28 @@ def test_slug_for_local_file_is_stable_and_readable():
 
 def test_detect_format_uses_url_and_media():
     assert cli.infer_format("https://www.instagram.com/x/reel/abc/", None, []) == "reel"
-    assert cli.infer_format("https://www.instagram.com/x/p/abc/", None, []) == "carousel"
+    # Instagram /p/ can be either a single image or a carousel; the permalink
+    # alone is not enough evidence to choose one.
+    assert cli.infer_format("https://www.instagram.com/x/p/abc/", None, []) == "unknown"
     assert cli.infer_format("https://www.tiktok.com/@x/video/1", None, []) == "tiktok"
     assert cli.infer_format("https://x.com/euge/status/1", None, []) == "post"
     assert cli.infer_format("https://www.linkedin.com/feed/update/urn:li:activity:1/", None, []) == "post"
     assert cli.infer_format("https://www.youtube.com/shorts/abc", None, []) == "short"
     assert cli.infer_format("/tmp/a.mp4", None, [Path("/tmp/a.mp4")]) == "reel"
-    assert cli.infer_format("/tmp/a.png", None, [Path("/tmp/a.png")]) == "carousel"
+    assert cli.infer_format("/tmp/a.png", None, [Path("/tmp/a.png")]) == "static"
+    assert cli.infer_format(
+        "/tmp/slides",
+        None,
+        [Path("/tmp/a.png"), Path("/tmp/b.png")],
+    ) == "carousel"
+
+
+def test_url_detection_rejects_userinfo_host_confusion():
+    malicious = "https://instagram.com@attacker.example/example/"
+
+    assert cli.is_url(malicious) is False
+    assert cli.platform_for_source(malicious) == "unknown"
+    assert cli.link_intake(malicious)["status"] == "error"
 
 
 def test_extracts_platform_ids():
@@ -160,6 +175,27 @@ def test_import_metrics_creates_piece_with_linkedin_engagement_rate(tmp_path):
     assert row["primary_metric_name"] == "engagement_rate"
     assert row["primary_metric_value"] == 0.055
     assert row["metric_source"] == "manual_csv"
+
+
+def test_views_without_interactions_do_not_become_zero_engagement(tmp_path):
+    output_root = tmp_path / "references"
+    con = cli.connect(output_root)
+
+    cli.import_metric_row(
+        con,
+        output_root=output_root,
+        row={
+            "url": "https://www.instagram.com/reel/views-only/",
+            "views": "100",
+        },
+    )
+
+    row = con.execute("SELECT * FROM pieces").fetchone()
+    assert row["interaction_count"] is None
+    assert row["engagement_rate"] is None
+    assert con.execute(
+        "SELECT COUNT(*) FROM metric_observations WHERE metric_name='engagement_rate'"
+    ).fetchone()[0] == 0
 
 
 def test_metric_report_ranks_by_primary_metric(tmp_path):

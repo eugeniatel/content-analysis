@@ -5,6 +5,7 @@ import csv
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -19,6 +20,20 @@ from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse
 from urllib.request import Request, urlopen
+
+from .analytics import analyze_winners
+from .evidence import persist_piece_evidence
+from .migrations import run_migrations
+from .profile_pipeline import build_profile_report, write_profile_report
+from .profiles import (
+    associate_piece,
+    finish_profile_run,
+    profile_identity,
+    start_profile_run,
+    store_metric_observations,
+    upsert_profile,
+)
+from .semantic import OllamaSemanticAnalyzer, RuleBasedSemanticAnalyzer
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
@@ -45,6 +60,8 @@ CSV_COLUMN_ALIASES = {
     "account": "creator",
     "author": "creator",
     "handle": "creator",
+    "profile url": "profile_url",
+    "account url": "profile_url",
     "impression": "impressions",
     "impressions": "impressions",
     "views": "views",
@@ -263,24 +280,33 @@ class LinkParser(HTMLParser):
 
 def is_url(value: str) -> bool:
     parsed = urlparse(value)
-    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+    return (
+        parsed.scheme in {"http", "https"}
+        and bool(parsed.hostname)
+        and parsed.username is None
+        and parsed.password is None
+    )
 
 
 def social_platform_from_host(host: str) -> str | None:
-    host = host.lower()
-    if "instagram.com" in host:
+    host = host.casefold().rstrip(".")
+
+    def matches(domain: str) -> bool:
+        return host == domain or host.endswith(f".{domain}")
+
+    if matches("instagram.com"):
         return "instagram"
-    if "tiktok.com" in host:
+    if matches("tiktok.com"):
         return "tiktok"
-    if "x.com" in host or "twitter.com" in host:
+    if matches("x.com") or matches("twitter.com"):
         return "x"
-    if "linkedin.com" in host:
+    if matches("linkedin.com"):
         return "linkedin"
-    if "youtube.com" in host or "youtu.be" in host:
+    if matches("youtube.com") or matches("youtu.be"):
         return "youtube"
-    if "threads.net" in host:
+    if matches("threads.net"):
         return "threads"
-    if "facebook.com" in host or "fb.watch" in host:
+    if matches("facebook.com") or matches("fb.watch"):
         return "facebook"
     return None
 
@@ -288,7 +314,7 @@ def social_platform_from_host(host: str) -> str | None:
 def is_social_content_url(source: str) -> bool:
     parsed = urlparse(source)
     path = parsed.path.lower()
-    platform = social_platform_from_host(parsed.netloc)
+    platform = social_platform_from_host(parsed.hostname or "")
     if platform == "instagram":
         return any(part in path for part in ("/p/", "/reel/", "/tv/"))
     if platform == "tiktok":
@@ -308,7 +334,7 @@ def is_social_content_url(source: str) -> bool:
 
 def is_social_profile_url(source: str) -> bool:
     parsed = urlparse(source)
-    platform = social_platform_from_host(parsed.netloc)
+    platform = social_platform_from_host(parsed.hostname or "")
     if not platform or is_social_content_url(source):
         return False
     path = parsed.path.strip("/")
@@ -492,7 +518,8 @@ def parse_float(value: Any) -> float | None:
         if not value:
             return None
     try:
-        return float(value)
+        number = float(value)
+        return number if math.isfinite(number) else None
     except (TypeError, ValueError):
         return None
 
@@ -550,50 +577,75 @@ def published_at_from_metadata(metadata: dict[str, Any] | None) -> str | None:
 
 
 def platform_for_source(source: str) -> str:
-    host = urlparse(source).netloc.lower()
-    if "instagram.com" in host:
-        return "instagram"
-    if "tiktok.com" in host:
-        return "tiktok"
-    if "x.com" in host or "twitter.com" in host:
-        return "x"
-    if "linkedin.com" in host:
-        return "linkedin"
-    if "youtube.com" in host or "youtu.be" in host:
-        return "youtube"
-    if "threads.net" in host:
-        return "threads"
-    if "facebook.com" in host or "fb.watch" in host:
-        return "facebook"
+    parsed = urlparse(source)
+    platform = social_platform_from_host(parsed.hostname or "")
+    if platform:
+        return platform
+    # A malformed HTTP(S) URL (for example one with userinfo host confusion)
+    # is not a local filesystem path.
+    if parsed.scheme in {"http", "https"}:
+        return "unknown"
     return "local" if not is_url(source) else "unknown"
 
 
 def infer_format(source: str, format_hint: str | None, media: Iterable[Path] = ()) -> str:
-    if format_hint:
+    if format_hint and format_hint != "unknown":
         return "tiktok" if format_hint == "tiktok" else format_hint
     if is_url(source):
         parsed = urlparse(source)
-        if "tiktok.com" in parsed.netloc:
+        platform = platform_for_source(source)
+        if platform == "tiktok":
             return "tiktok"
-        if "youtube.com" in parsed.netloc and "/shorts/" in parsed.path:
+        if platform == "youtube" and "/shorts/" in parsed.path:
             return "short"
-        if "x.com" in parsed.netloc or "twitter.com" in parsed.netloc:
+        if platform == "x":
             return "post"
-        if "linkedin.com" in parsed.netloc:
+        if platform == "linkedin":
             return "post"
-        if "threads.net" in parsed.netloc:
+        if platform == "threads":
             return "post"
-        if "facebook.com" in parsed.netloc or "fb.watch" in parsed.netloc:
+        if platform == "facebook":
             return "post"
         if "/reel/" in parsed.path:
             return "reel"
-        if "/p/" in parsed.path:
-            return "carousel"
     media = list(media)
     if any(p.suffix.lower() in VIDEO_EXTENSIONS for p in media):
         return "reel"
-    if any(p.suffix.lower() in IMAGE_EXTENSIONS for p in media):
+    image_count = sum(p.suffix.lower() in IMAGE_EXTENSIONS for p in media)
+    if image_count > 1:
         return "carousel"
+    if image_count == 1:
+        return "static"
+    return "unknown"
+
+
+def infer_format_from_metadata(source: str, metadata: dict[str, Any] | None) -> str:
+    direct = infer_format(source, None)
+    if direct != "unknown":
+        return direct
+    metadata = metadata or {}
+    media_type = str(
+        metadata.get("media_type")
+        or metadata.get("post_type")
+        or metadata.get("type")
+        or ""
+    ).casefold()
+    child_count = parse_int(
+        metadata.get("carousel_media_count")
+        or metadata.get("media_count")
+        or metadata.get("playlist_count")
+    )
+    entries = metadata.get("entries")
+    if child_count is None and isinstance(entries, list):
+        child_count = len(entries)
+    if (child_count is not None and child_count > 1) or any(
+        token in media_type for token in ("carousel", "sidecar", "album")
+    ):
+        return "carousel"
+    if any(token in media_type for token in ("image", "photo", "static")):
+        return "static"
+    if metadata.get("duration") is not None or any(token in media_type for token in ("video", "reel")):
+        return "reel"
     return "unknown"
 
 
@@ -605,6 +657,7 @@ def connect(output_root: Path) -> sqlite3.Connection:
     output_root.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(db_path(output_root))
     con.row_factory = sqlite3.Row
+    con.execute("PRAGMA foreign_keys=ON")
     init_db(con)
     return con
 
@@ -688,12 +741,27 @@ def init_db(con: sqlite3.Connection) -> None:
         if column not in existing:
             con.execute(f"ALTER TABLE pieces ADD COLUMN {column} {decl}")
     con.commit()
+    run_migrations(con)
 
 
-def record_failure(con: sqlite3.Connection, *, source_id_: str, source_url: str, stage: str, message: str) -> None:
+def record_failure(
+    con: sqlite3.Connection,
+    *,
+    source_id_: str,
+    source_url: str,
+    stage: str,
+    message: str,
+    profile_id: str | None = None,
+    run_id: str | None = None,
+    piece_id: str | None = None,
+) -> None:
     con.execute(
-        "INSERT INTO failures(source_id, source_url, stage, message, occurred_at) VALUES (?, ?, ?, ?, ?)",
-        (source_id_, source_url, stage, message, utc_now()),
+        """
+        INSERT INTO failures(
+            source_id, source_url, stage, message, occurred_at, profile_id, run_id, piece_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (source_id_, source_url, stage, message, utc_now(), profile_id, run_id, piece_id),
     )
     con.commit()
 
@@ -764,7 +832,9 @@ def yt_dlp_flat_entries(source: str, cookies_file: Path | None, *, limit: int) -
     entries = data.get("entries") or []
     urls: list[str] = []
     for entry in entries[:limit]:
-        url = entry.get("url") or entry.get("webpage_url")
+        # Flat extractors sometimes put an opaque media ID in ``url`` while
+        # retaining the canonical public permalink in ``webpage_url``.
+        url = entry.get("webpage_url") or entry.get("url")
         if not url:
             continue
         if is_url(url):
@@ -818,6 +888,8 @@ def yt_dlp_download(source: str, outdir: Path, cookies_file: Path | None) -> tup
     proc = run(cmd, timeout=420)
     after = {p for p in outdir.rglob("*") if p.is_file()}
     media = [p for p in sorted(after - before) if p.suffix.lower() in MEDIA_EXTENSIONS or p.name.endswith(".image")]
+    if not media and proc.returncode == 0:
+        media = [p for p in sorted(after) if p.suffix.lower() in MEDIA_EXTENSIONS or p.name.endswith(".image")]
     return media, proc.stderr.strip() if proc.returncode != 0 else ""
 
 
@@ -872,7 +944,9 @@ def collect_source(
             record_failure(con, source_id_=id_, source_url=source, stage="collect", message=f"metadata: {meta_error}")
 
         format_ = infer_format(source, format_hint)
-        if format_ == "carousel":
+        if format_ in {"carousel", "static"} or (
+            platform_for_source(source) == "instagram" and "/p/" in urlparse(source).path
+        ):
             media, dl_error = gallery_dl_download(source, raw_dir, cookies_file)
             if dl_error:
                 record_failure(con, source_id_=id_, source_url=source, stage="collect", message=f"gallery-dl: {dl_error}")
@@ -886,24 +960,44 @@ def collect_source(
             record_failure(con, source_id_=id_, source_url=source, stage="collect", message=local_error)
 
     media_json = [rel(p, output_root) for p in sorted(set(media))]
+    collection_status = "done" if media_json else "failed"
+    if not media_json:
+        record_failure(
+            con,
+            source_id_=id_,
+            source_url=source,
+            stage="collect",
+            message="no media was downloaded or copied; existing evidence was preserved",
+        )
     con.execute(
         """
         INSERT INTO sources(
             id, source_url, platform, format_hint, notes, status_collect, status_extract,
             status_normalize, raw_dir, processed_dir, metadata_json, media_json, collected_at
         )
-        VALUES (?, ?, ?, ?, ?, 'done', NULL, NULL, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             source_url=excluded.source_url,
             platform=excluded.platform,
             format_hint=excluded.format_hint,
             notes=excluded.notes,
-            status_collect='done',
+            status_collect=CASE
+                WHEN excluded.status_collect='done' THEN 'done'
+                WHEN sources.status_collect='done' THEN 'done'
+                ELSE excluded.status_collect
+            END,
             raw_dir=excluded.raw_dir,
             processed_dir=excluded.processed_dir,
-            metadata_json=excluded.metadata_json,
-            media_json=excluded.media_json,
-            collected_at=excluded.collected_at
+            metadata_json=COALESCE(excluded.metadata_json, sources.metadata_json),
+            media_json=CASE
+                WHEN excluded.media_json IS NOT NULL AND excluded.media_json<>'[]'
+                    THEN excluded.media_json
+                ELSE sources.media_json
+            END,
+            collected_at=CASE
+                WHEN excluded.status_collect='done' THEN excluded.collected_at
+                ELSE sources.collected_at
+            END
         """,
         (
             id_,
@@ -911,9 +1005,10 @@ def collect_source(
             platform_for_source(source),
             format_hint,
             notes,
+            collection_status,
             rel(raw_dir, output_root),
             rel(processed_dir, output_root),
-            json_dumps(metadata),
+            json_dumps(metadata) if metadata is not None else None,
             json_dumps(media_json),
             utc_now(),
         ),
@@ -921,7 +1016,7 @@ def collect_source(
     con.commit()
     if delay:
         time.sleep(delay)
-    return {"id": id_, "source": source, "status": "done", "media": len(media)}
+    return {"id": id_, "source": source, "status": collection_status, "media": len(media)}
 
 
 def extract_audio(video: Path, outdir: Path) -> tuple[Path | None, str]:
@@ -942,8 +1037,11 @@ def transcribe_faster_whisper(audio: Path, outdir: Path, *, language: str, model
         "from faster_whisper import WhisperModel\n"
         "audio, out, model_name, lang = sys.argv[1:5]\n"
         "model = WhisperModel(model_name, device='auto', compute_type='auto')\n"
-        "segments, _ = model.transcribe(audio, language=lang, vad_filter=True)\n"
-        "rows = [{'start': round(s.start, 3), 'end': round(s.end, 3), 'text': s.text.strip()} for s in segments]\n"
+        "segments, _ = model.transcribe(audio, language=lang, vad_filter=True, word_timestamps=True)\n"
+        "rows = []\n"
+        "for s in segments:\n"
+        "    words = [{'start': round(w.start, 3), 'end': round(w.end, 3), 'word': w.word.strip(), 'probability': round(w.probability, 4)} for w in (s.words or []) if w.word.strip()]\n"
+        "    rows.append({'start': round(s.start, 3), 'end': round(s.end, 3), 'text': s.text.strip(), 'words': words})\n"
         "open(out, 'w', encoding='utf-8').write(json.dumps(rows, ensure_ascii=False, indent=2) + '\\n')\n"
     )
     out = outdir / f"{audio.stem}.transcript.json"
@@ -967,6 +1065,8 @@ def transcribe_openai_whisper(audio: Path, outdir: Path, *, language: str, model
             model,
             "--output_format",
             "json",
+            "--word_timestamps",
+            "True",
             "--output_dir",
             str(outdir),
         ],
@@ -979,7 +1079,21 @@ def transcribe_openai_whisper(audio: Path, outdir: Path, *, language: str, model
         return [], "whisper did not produce json output"
     data = read_json(raw)
     rows = [
-        {"start": round(float(s.get("start", 0)), 3), "end": round(float(s.get("end", 0)), 3), "text": str(s.get("text", "")).strip()}
+        {
+            "start": round(float(s.get("start", 0)), 3),
+            "end": round(float(s.get("end", 0)), 3),
+            "text": str(s.get("text", "")).strip(),
+            "words": [
+                {
+                    "start": round(float(word.get("start", 0)), 3),
+                    "end": round(float(word.get("end", 0)), 3),
+                    "word": str(word.get("word", "")).strip(),
+                    "probability": parse_float(word.get("probability")),
+                }
+                for word in s.get("words", [])
+                if str(word.get("word", "")).strip()
+            ],
+        }
         for s in data.get("segments", [])
         if str(s.get("text", "")).strip()
     ]
@@ -1045,12 +1159,16 @@ def easyocr_image(image: Path, *, languages: list[str], min_confidence: float) -
     code = (
         "import json, sys\n"
         "import easyocr\n"
+        "from PIL import Image\n"
         "image = sys.argv[1]\n"
         "langs = sys.argv[2].split(',')\n"
         "reader = easyocr.Reader(langs, gpu=False)\n"
+        "image_width, image_height = Image.open(image).size\n"
         "rows = []\n"
         "for bbox, text, conf in reader.readtext(image):\n"
-        "    rows.append({'text': text, 'confidence': float(conf)})\n"
+        "    xs = [float(point[0]) for point in bbox]\n"
+        "    ys = [float(point[1]) for point in bbox]\n"
+        "    rows.append({'text': text, 'confidence': float(conf), 'x': min(xs), 'y': min(ys), 'width': max(xs)-min(xs), 'height': max(ys)-min(ys), 'image_width': image_width, 'image_height': image_height})\n"
         "print(json.dumps(rows, ensure_ascii=False))\n"
     )
     proc = run([sys.executable, "-c", code, str(image), ",".join(languages)], timeout=300)
@@ -1098,7 +1216,7 @@ def tesseract_image(image: Path, *, languages: list[str], min_confidence: float)
     if proc.returncode != 0:
         return [], proc.stderr.strip()
     # TSV columns: level page block par line word left top width height conf text
-    lines: dict[tuple[str, str, str], dict[str, list[Any]]] = {}
+    lines: dict[tuple[str, str, str], dict[str, Any]] = {}
     order: list[tuple[str, str, str]] = []
     for raw in proc.stdout.splitlines()[1:]:
         cols = raw.split("\t")
@@ -1110,10 +1228,18 @@ def tesseract_image(image: Path, *, languages: list[str], min_confidence: float)
             continue
         key = (cols[2], cols[3], cols[4])
         if key not in lines:
-            lines[key] = {"words": [], "confs": []}
+            lines[key] = {"words": [], "confs": [], "left": [], "top": [], "right": [], "bottom": []}
             order.append(key)
         lines[key]["words"].append(text)
         lines[key]["confs"].append(conf / 100.0)
+        left = parse_int(cols[6]) or 0
+        top = parse_int(cols[7]) or 0
+        width = parse_int(cols[8]) or 0
+        height = parse_int(cols[9]) or 0
+        lines[key]["left"].append(left)
+        lines[key]["top"].append(top)
+        lines[key]["right"].append(left + width)
+        lines[key]["bottom"].append(top + height)
     rows: list[dict[str, Any]] = []
     for key in order:
         bucket = lines[key]
@@ -1122,7 +1248,18 @@ def tesseract_image(image: Path, *, languages: list[str], min_confidence: float)
         line_conf = sum(bucket["confs"]) / len(bucket["confs"])
         if line_conf < min_confidence:
             continue
-        rows.append({"text": " ".join(bucket["words"]), "confidence": round(line_conf, 3)})
+        left = min(bucket["left"])
+        top = min(bucket["top"])
+        rows.append({
+            "text": " ".join(bucket["words"]),
+            "confidence": round(line_conf, 3),
+            "x": left,
+            "y": top,
+            "width": max(bucket["right"]) - left,
+            "height": max(bucket["bottom"]) - top,
+            "image_width": None,
+            "image_height": None,
+        })
     return rows, ""
 
 
@@ -1151,7 +1288,12 @@ def dedupe_onscreen(rows: list[dict[str, Any]], threshold: float) -> list[dict[s
             continue
         if kept and similarity(kept[-1]["text"], text) >= threshold:
             continue
-        kept.append({"timestamp": row["timestamp"], "text": text, "confidence": row.get("confidence")})
+        kept.append({
+            "timestamp": row["timestamp"],
+            "text": text,
+            "confidence": row.get("confidence"),
+            "blocks": row.get("blocks") or [],
+        })
     return kept
 
 
@@ -1166,10 +1308,11 @@ def extract_video(
     min_confidence: float,
     dedupe_threshold: float,
     use_scene_detect: bool,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[float], list[str]]:
     errors: list[str] = []
     transcript: list[dict[str, Any]] = []
     onscreen: list[dict[str, Any]] = []
+    scene_changes: list[float] = []
     for file in media:
         if file.suffix.lower() in VIDEO_EXTENSIONS | AUDIO_EXTENSIONS:
             audio = file
@@ -1187,6 +1330,10 @@ def extract_video(
 
         if file.suffix.lower() in VIDEO_EXTENSIONS:
             timestamps = scene_timestamps(file, fallback_every_seconds=frame_every_seconds) if use_scene_detect else []
+            if timestamps:
+                # SceneDetect returns scene starts. The initial 0s boundary is not
+                # a change, and fallback sampling must never be labeled cadence.
+                scene_changes.extend(stamp for stamp in timestamps if stamp > 0)
             if not timestamps:
                 timestamps = fallback_frame_timestamps(file, frame_every_seconds)
             for idx, stamp in enumerate(timestamps):
@@ -1202,8 +1349,18 @@ def extract_video(
                 text = " ".join(row["text"] for row in ocr_rows if row.get("text")).strip()
                 if text:
                     confs = [float(row["confidence"]) for row in ocr_rows if row.get("confidence") is not None]
-                    onscreen.append({"timestamp": stamp, "text": text, "confidence": (sum(confs) / len(confs)) if confs else None})
-    return transcript, dedupe_onscreen(sorted(onscreen, key=lambda r: r["timestamp"]), dedupe_threshold), errors
+                    onscreen.append({
+                        "timestamp": stamp,
+                        "text": text,
+                        "confidence": (sum(confs) / len(confs)) if confs else None,
+                        "blocks": ocr_rows,
+                    })
+    return (
+        transcript,
+        dedupe_onscreen(sorted(onscreen, key=lambda r: r["timestamp"]), dedupe_threshold),
+        sorted(set(scene_changes)),
+        errors,
+    )
 
 
 def extract_carousel(*, media: list[Path], processed_dir: Path, languages: list[str], min_confidence: float) -> tuple[list[dict[str, Any]], list[str]]:
@@ -1215,7 +1372,12 @@ def extract_carousel(*, media: list[Path], processed_dir: Path, languages: list[
         if ocr_error:
             errors.append(f"ocr slide {idx} {image.name}: {ocr_error}")
         text = " ".join(row["text"] for row in rows if row.get("text")).strip()
-        slides.append({"slide_index": idx, "text": text, "confidence": max([float(r.get("confidence", 0)) for r in rows], default=None)})
+        slides.append({
+            "slide_index": idx,
+            "text": text,
+            "confidence": max([float(r.get("confidence", 0)) for r in rows], default=None),
+            "blocks": rows,
+        })
     return slides, errors
 
 
@@ -1238,17 +1400,25 @@ def extract_source(
     if already_done(con, "sources", id_, "status_extract", force=force):
         return {"id": id_, "source": source, "status": "skipped"}
     media = [output_root / p for p in (json_loads(row["media_json"]) or [])]
+    media = [path for path in media if path.exists()]
+    if not media:
+        message = "no collected media available; extraction skipped to preserve existing evidence"
+        record_failure(con, source_id_=id_, source_url=source, stage="extract", message=message)
+        con.execute("UPDATE sources SET status_extract='failed' WHERE id=?", (id_,))
+        con.commit()
+        return {"id": id_, "source": source, "status": "failed", "error": message}
     processed_dir = output_root / row["processed_dir"]
     format_ = infer_format(source, row["format_hint"], media)
     errors: list[str] = []
     transcript: list[dict[str, Any]] | None = None
     onscreen: list[dict[str, Any]] | None = None
     slides: list[dict[str, Any]] | None = None
+    scene_changes: list[float] | None = None
 
-    if format_ == "carousel":
+    if format_ in {"carousel", "static"}:
         slides, errors = extract_carousel(media=media, processed_dir=processed_dir, languages=languages, min_confidence=min_confidence)
     else:
-        transcript, onscreen, errors = extract_video(
+        transcript, onscreen, scene_changes, errors = extract_video(
             media=media,
             processed_dir=processed_dir,
             languages=languages,
@@ -1260,7 +1430,20 @@ def extract_source(
             use_scene_detect=use_scene_detect,
         )
 
-    artifact = {"format": format_, "transcript": transcript, "onscreen_text": onscreen, "slides": slides, "extracted_at": utc_now()}
+    transcript_words = [
+        word
+        for segment in (transcript or [])
+        for word in (segment.get("words") or [])
+    ]
+    artifact = {
+        "format": format_,
+        "transcript": transcript,
+        "transcript_words": transcript_words,
+        "onscreen_text": onscreen,
+        "slides": slides,
+        "scene_changes": scene_changes,
+        "extracted_at": utc_now(),
+    }
     write_json(processed_dir / "extracted.json", artifact)
     for error in errors:
         record_failure(con, source_id_=id_, source_url=source, stage="extract", message=error)
@@ -1292,7 +1475,11 @@ def numeric_metrics(values: dict[str, Any]) -> dict[str, float]:
         if value is None:
             continue
         if key in {"engagement_rate", "completion_rate", "retention_rate", "watched_full_video_pct"}:
-            value = normalize_metric_rate(value) or value
+            value = normalize_metric_rate(value)
+            if value is None or not 0 <= value <= 1:
+                continue
+        elif value < 0:
+            continue
         metrics[key] = value
     return metrics
 
@@ -1375,6 +1562,21 @@ def normalize_source(con: sqlite3.Connection, *, output_root: Path, row: sqlite3
     transcript = extracted.get("transcript") or []
     onscreen = extracted.get("onscreen_text") or []
     slides = extracted.get("slides") or []
+    transcript_json = (
+        json_dumps(extracted.get("transcript"))
+        if extracted.get("transcript") is not None
+        else None
+    )
+    onscreen_json = (
+        json_dumps(extracted.get("onscreen_text"))
+        if extracted.get("onscreen_text") is not None
+        else None
+    )
+    slides_json = (
+        json_dumps(extracted.get("slides"))
+        if extracted.get("slides") is not None
+        else None
+    )
     hook_spoken = " ".join(seg["text"] for seg in transcript if float(seg.get("start", 0)) <= 3).strip() or None
     hook_onscreen = (slides[0].get("text") if slides else onscreen[0].get("text") if onscreen else None)
     cta_spoken = transcript[-1].get("text") if transcript else None
@@ -1386,27 +1588,29 @@ def normalize_source(con: sqlite3.Connection, *, output_root: Path, row: sqlite3
     interaction_count = sum(present_interactions) if present_interactions else None
     engagement_rate = None
     engagement_basis = None
-    if views:
-        engagement_rate = (interaction_count or 0) / views
+    if views and interaction_count is not None:
+        engagement_rate = interaction_count / views
         engagement_basis = "views"
     elif interaction_count is not None:
         # Platforms like Instagram never expose views via yt-dlp. Record the raw
         # interaction total as the ranking signal instead of estimating views.
         engagement_basis = "interactions"
+    metrics = numeric_metrics({
+        "views": views,
+        "likes": likes,
+        "comments": comments,
+        "shares": shares,
+        "engagement_rate": engagement_rate,
+    })
     metric_summary = derive_metric_summary(
         platform=row["platform"],
-        metrics=numeric_metrics({
-            "views": views,
-            "likes": likes,
-            "comments": comments,
-            "shares": shares,
-            "engagement_rate": engagement_rate,
-        }),
+        metrics=metrics,
         interaction_count=interaction_count,
         engagement_rate=engagement_rate,
         engagement_basis=engagement_basis,
         metric_source="metadata" if any(v is not None for v in (views, likes, comments, shares)) else None,
     )
+    metrics_captured_at = utc_now() if metric_summary["metric_source"] else None
 
     con.execute(
         """
@@ -1422,32 +1626,38 @@ def normalize_source(con: sqlite3.Connection, *, output_root: Path, row: sqlite3
         ON CONFLICT(id) DO UPDATE SET
             source_url=excluded.source_url,
             platform=excluded.platform,
-            format=excluded.format,
-            creator=excluded.creator,
-            published_at=excluded.published_at,
-            duration_sec=excluded.duration_sec,
-            duration_bucket=excluded.duration_bucket,
-            caption=excluded.caption,
-            transcript=excluded.transcript,
-            onscreen_text=excluded.onscreen_text,
-            slides=excluded.slides,
-            hook_spoken=excluded.hook_spoken,
-            hook_onscreen=excluded.hook_onscreen,
-            cta_spoken=excluded.cta_spoken,
-            views=excluded.views,
-            likes=excluded.likes,
-            comments=excluded.comments,
-            shares=excluded.shares,
-            interaction_count=excluded.interaction_count,
-            engagement_rate=excluded.engagement_rate,
-            engagement_basis=excluded.engagement_basis,
-            primary_metric_name=excluded.primary_metric_name,
-            primary_metric_value=excluded.primary_metric_value,
-            primary_metric_basis=excluded.primary_metric_basis,
-            secondary_metrics=excluded.secondary_metrics,
-            metric_source=excluded.metric_source,
-            metric_confidence=excluded.metric_confidence,
-            metrics_captured_at=excluded.metrics_captured_at,
+            format=CASE
+                WHEN excluded.format IS NULL OR excluded.format='unknown' THEN pieces.format
+                ELSE excluded.format
+            END,
+            creator=COALESCE(excluded.creator, pieces.creator),
+            published_at=COALESCE(excluded.published_at, pieces.published_at),
+            duration_sec=COALESCE(excluded.duration_sec, pieces.duration_sec),
+            duration_bucket=CASE
+                WHEN excluded.duration_sec IS NULL THEN pieces.duration_bucket
+                ELSE excluded.duration_bucket
+            END,
+            caption=COALESCE(excluded.caption, pieces.caption),
+            transcript=COALESCE(excluded.transcript, pieces.transcript),
+            onscreen_text=COALESCE(excluded.onscreen_text, pieces.onscreen_text),
+            slides=COALESCE(excluded.slides, pieces.slides),
+            hook_spoken=COALESCE(excluded.hook_spoken, pieces.hook_spoken),
+            hook_onscreen=COALESCE(excluded.hook_onscreen, pieces.hook_onscreen),
+            cta_spoken=COALESCE(excluded.cta_spoken, pieces.cta_spoken),
+            views=COALESCE(excluded.views, pieces.views),
+            likes=COALESCE(excluded.likes, pieces.likes),
+            comments=COALESCE(excluded.comments, pieces.comments),
+            shares=COALESCE(excluded.shares, pieces.shares),
+            interaction_count=COALESCE(excluded.interaction_count, pieces.interaction_count),
+            engagement_rate=COALESCE(excluded.engagement_rate, pieces.engagement_rate),
+            engagement_basis=COALESCE(excluded.engagement_basis, pieces.engagement_basis),
+            primary_metric_name=COALESCE(excluded.primary_metric_name, pieces.primary_metric_name),
+            primary_metric_value=COALESCE(excluded.primary_metric_value, pieces.primary_metric_value),
+            primary_metric_basis=COALESCE(excluded.primary_metric_basis, pieces.primary_metric_basis),
+            secondary_metrics=COALESCE(excluded.secondary_metrics, pieces.secondary_metrics),
+            metric_source=COALESCE(excluded.metric_source, pieces.metric_source),
+            metric_confidence=COALESCE(excluded.metric_confidence, pieces.metric_confidence),
+            metrics_captured_at=COALESCE(excluded.metrics_captured_at, pieces.metrics_captured_at),
             notes=excluded.notes,
             collected_at=excluded.collected_at
         """,
@@ -1461,9 +1671,9 @@ def normalize_source(con: sqlite3.Connection, *, output_root: Path, row: sqlite3
             duration_sec,
             duration_bucket(format_, duration_sec),
             metadata_value(metadata, "description"),
-            json_dumps(transcript) if transcript else None,
-            json_dumps(onscreen) if onscreen else None,
-            json_dumps(slides) if slides else None,
+            transcript_json,
+            onscreen_json,
+            slides_json,
             hook_spoken,
             hook_onscreen,
             cta_spoken,
@@ -1480,19 +1690,58 @@ def normalize_source(con: sqlite3.Connection, *, output_root: Path, row: sqlite3
             json_dumps(metric_summary["secondary_metrics"]) if metric_summary["secondary_metrics"] else None,
             metric_summary["metric_source"],
             metric_summary["metric_confidence"],
-            utc_now() if metric_summary["metric_source"] else None,
+            metrics_captured_at,
             row["notes"],
             row["collected_at"] or utc_now(),
         ),
     )
+    con.execute(
+        "UPDATE pieces SET scene_changes=COALESCE(?, scene_changes) WHERE id=?",
+        (
+            json_dumps(extracted.get("scene_changes"))
+            if extracted.get("scene_changes") is not None
+            else None,
+            id_,
+        ),
+    )
     con.execute("UPDATE sources SET status_normalize='done' WHERE id=?", (id_,))
     con.commit()
+    persisted_piece = con.execute("SELECT caption FROM pieces WHERE id=?", (id_,)).fetchone()
+    persist_piece_evidence(
+        con,
+        piece_id=id_,
+        caption=persisted_piece["caption"] if persisted_piece else metadata_value(metadata, "description"),
+        extracted=extracted,
+        source_path=rel(extracted_path, output_root),
+    )
+    if metric_summary["metric_source"] and metrics_captured_at:
+        store_metric_observations(
+            con,
+            piece_id=id_,
+            metrics=metrics,
+            source=metric_summary["metric_source"],
+            captured_at=metrics_captured_at,
+            confidence=metric_summary["metric_confidence"],
+            basis_by_metric={
+                name: (
+                    f"metadata:derived_{engagement_basis or 'unknown'}"
+                    if name == "engagement_rate"
+                    else "metadata:public_snapshot"
+                )
+                for name in metrics
+            },
+            unit_by_metric={
+                name: "ratio" if name == "engagement_rate" else "count"
+                for name in metrics
+            },
+            denominator_by_metric={"engagement_rate": engagement_basis},
+        )
     return {"id": id_, "source": source, "status": "done"}
 
 
 def piece_to_json(row: sqlite3.Row) -> dict[str, Any]:
     out = dict(row)
-    for key in ("transcript", "onscreen_text", "slides", "secondary_metrics"):
+    for key in ("transcript", "onscreen_text", "slides", "scene_changes", "secondary_metrics"):
         out[key] = json_loads(out.get(key))
     return out
 
@@ -1739,7 +1988,7 @@ def metric_row_from_metadata(source: str, metadata: dict[str, Any], *, platform:
     row: dict[str, str] = {
         "url": source,
         "platform": platform,
-        "format": infer_format(source, None),
+        "format": infer_format_from_metadata(source, metadata),
         "creator": str(metadata_value(metadata, "uploader", "channel", "creator") or ""),
         "published_at": published_at_from_metadata(metadata) or "",
         "duration_sec": str(metadata_value(metadata, "duration") or ""),
@@ -1786,10 +2035,14 @@ def import_metric_row(con: sqlite3.Connection, *, output_root: Path, row: dict[s
     captured_at = first_present(row, "metrics_captured_at", "captured_at") or collected_at
     metric_source = first_present(row, "metric_source") or "manual_csv"
 
-    likes = parse_int(first_present(row, "likes", "reactions"))
-    comments = parse_int(first_present(row, "comments", "replies"))
-    shares = parse_int(first_present(row, "shares", "reposts"))
-    views = parse_int(first_present(row, "views", "plays"))
+    def nonnegative_int(value: Any) -> int | None:
+        parsed = parse_int(value)
+        return parsed if parsed is not None and parsed >= 0 else None
+
+    likes = nonnegative_int(first_present(row, "likes", "reactions"))
+    comments = nonnegative_int(first_present(row, "comments", "replies"))
+    shares = nonnegative_int(first_present(row, "shares", "reposts"))
+    views = nonnegative_int(first_present(row, "views", "plays"))
     metrics = numeric_metrics(row)
     for key, value in (("likes", likes), ("comments", comments), ("shares", shares), ("views", views)):
         if value is not None:
@@ -1797,23 +2050,35 @@ def import_metric_row(con: sqlite3.Connection, *, output_root: Path, row: dict[s
     present_interactions = [v for v in (likes, comments, shares) if v is not None]
     interaction_count = sum(present_interactions) if present_interactions else None
     explicit_engagement_rate = normalize_metric_rate(parse_float(first_present(row, "engagement_rate")))
+    if explicit_engagement_rate is not None and not 0 <= explicit_engagement_rate <= 1:
+        explicit_engagement_rate = None
     engagement_rate = explicit_engagement_rate
     engagement_basis = "explicit" if explicit_engagement_rate is not None else None
     denominator = parse_float(first_present(row, "views", "impressions", "reach", "plays"))
-    if engagement_rate is None and denominator:
-        engagement_rate = (interaction_count or 0) / denominator
+    if engagement_rate is None and denominator and interaction_count is not None:
+        engagement_rate = interaction_count / denominator
         engagement_basis = "derived"
     elif engagement_rate is None and interaction_count is not None:
         engagement_basis = "interactions"
 
-    primary_value = normalize_metric_rate(parse_float(first_present(row, "primary_metric_value")))
+    explicit_primary_name = first_present(row, "primary_metric_name")
+    primary_value = parse_float(first_present(row, "primary_metric_value"))
+    if primary_value is not None:
+        if explicit_primary_name in {"engagement_rate", "completion_rate", "retention_rate", "watched_full_video_pct"}:
+            primary_value = normalize_metric_rate(primary_value)
+            if primary_value is not None and not 0 <= primary_value <= 1:
+                primary_value = None
+        elif primary_value < 0:
+            primary_value = None
+    if explicit_primary_name and primary_value is not None:
+        metrics[explicit_primary_name] = primary_value
     metric_summary = derive_metric_summary(
         platform=platform,
         metrics=metrics,
         interaction_count=interaction_count,
         engagement_rate=engagement_rate,
         engagement_basis=engagement_basis,
-        explicit_primary_name=first_present(row, "primary_metric_name"),
+        explicit_primary_name=explicit_primary_name,
         explicit_primary_value=primary_value,
         metric_source=metric_source,
     )
@@ -1914,6 +2179,44 @@ def import_metric_row(con: sqlite3.Connection, *, output_root: Path, row: dict[s
         ),
     )
     con.commit()
+    generic_basis = first_present(row, "metric_basis", "basis")
+    generic_unit = first_present(row, "metric_unit", "unit")
+    generic_denominator = first_present(row, "denominator_name", "metric_denominator")
+    basis_by_metric = {
+        name: str(
+            first_present(row, f"{name}_basis")
+            or generic_basis
+            or f"{metric_source}:observed_{'rate' if name in {'engagement_rate', 'completion_rate', 'retention_rate', 'watched_full_video_pct'} else 'total'}"
+        )
+        for name in metrics
+    }
+    unit_by_metric = {
+        name: str(first_present(row, f"{name}_unit") or generic_unit or (
+            "ratio" if name in {"engagement_rate", "completion_rate", "retention_rate", "watched_full_video_pct"}
+            else "seconds" if name == "avg_watch_time"
+            else "count"
+        ))
+        for name in metrics
+    }
+    denominator_by_metric = {
+        name: first_present(row, f"{name}_denominator", f"{name}_denominator_name") or generic_denominator
+        for name in metrics
+    }
+    if engagement_basis:
+        denominator_by_metric["engagement_rate"] = (
+            denominator_by_metric.get("engagement_rate") or engagement_basis
+        )
+    store_metric_observations(
+        con,
+        piece_id=id_,
+        metrics=metrics,
+        source=metric_source,
+        captured_at=captured_at,
+        confidence=metric_summary["metric_confidence"],
+        basis_by_metric=basis_by_metric,
+        unit_by_metric=unit_by_metric,
+        denominator_by_metric=denominator_by_metric,
+    )
     return {
         "id": id_,
         "source": source,
@@ -2318,6 +2621,466 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def platform_content_id(source: str) -> str | None:
+    if not is_url(source):
+        return None
+    parts = [part for part in urlparse(source).path.strip("/").split("/") if part]
+    if not parts:
+        return None
+    if parts[-1].startswith("@"):  # profile URL, not a content ID
+        return None
+    return parts[-1]
+
+
+def _tag_source_failures(
+    con: sqlite3.Connection,
+    *,
+    source: str,
+    profile_id: str,
+    run_id: str,
+    piece_id: str | None,
+) -> None:
+    con.execute(
+        """
+        UPDATE failures
+        SET profile_id=COALESCE(profile_id, ?),
+            run_id=COALESCE(run_id, ?),
+            piece_id=COALESCE(piece_id, ?)
+        WHERE source_id=?
+        """,
+        (profile_id, run_id, piece_id, source_id(source)),
+    )
+    con.commit()
+
+
+def _deep_cohort_ids(
+    con: sqlite3.Connection,
+    *,
+    profile_id: str,
+    run_id: str,
+    objective: str,
+    top_k: int,
+    limit: int,
+) -> list[str]:
+    pieces = [
+        dict(row)
+        for row in con.execute(
+            """
+            SELECT p.* FROM profile_run_pieces membership
+            JOIN pieces p ON p.id=membership.piece_id
+            WHERE p.profile_id=? AND membership.profile_run_id=?
+            ORDER BY COALESCE(membership.inventory_position, 2147483647), p.published_at DESC, p.id
+            """,
+            (profile_id, run_id),
+        ).fetchall()
+    ]
+    if not pieces:
+        return []
+    observations = [
+        dict(row)
+        for row in con.execute(
+            """
+            SELECT mo.* FROM metric_observations mo
+            JOIN pieces p ON p.id=mo.piece_id
+            JOIN profile_run_pieces membership
+              ON membership.piece_id=p.id AND membership.profile_run_id=?
+            WHERE p.profile_id=?
+            """,
+            (run_id, profile_id),
+        ).fetchall()
+    ]
+    preliminary = analyze_winners(
+        pieces,
+        observations,
+        objective=objective,
+        top_k=top_k,
+        categorical_fields=[],
+        continuous_fields=[],
+        bootstrap_iterations=100,
+    )
+    winners = list(preliminary["cohorts"]["winner_piece_ids"])
+    non_winners = list(preliminary["cohorts"]["non_winner_piece_ids"])
+    if not winners:
+        return [str(row["id"]) for row in pieces[:limit]]
+    by_id = {str(row["id"]): row for row in pieces}
+    selected = list(winners)
+    for winner_id in winners:
+        winner_format = by_id[winner_id].get("media_type") or by_id[winner_id].get("format")
+        match = next(
+            (
+                piece_id
+                for piece_id in non_winners
+                if piece_id not in selected
+                and (by_id[piece_id].get("media_type") or by_id[piece_id].get("format")) == winner_format
+            ),
+            None,
+        )
+        if match:
+            selected.append(match)
+    selected.extend(piece_id for piece_id in non_winners if piece_id not in selected)
+    return selected[:limit]
+
+
+def _deep_process_profile(
+    con: sqlite3.Connection,
+    *,
+    output_root: Path,
+    profile_id: str,
+    run_id: str,
+    piece_ids: list[str],
+    args: argparse.Namespace,
+) -> None:
+    languages = [lang.strip() for lang in args.ocr_languages.split(",") if lang.strip()]
+    for piece_id in piece_ids:
+        piece = con.execute("SELECT * FROM pieces WHERE id=?", (piece_id,)).fetchone()
+        if not piece:
+            continue
+        source = piece["source_url"]
+        collect_result = collect_source(
+            con,
+            output_root=output_root,
+            source=source,
+            format_hint=piece["format"] or "",
+            notes=piece["notes"] or "",
+            cookies_file=args.cookies,
+            delay=0,
+            force=args.force,
+        )
+        if collect_result.get("status") == "failed":
+            _tag_source_failures(
+                con,
+                source=source,
+                profile_id=profile_id,
+                run_id=run_id,
+                piece_id=piece_id,
+            )
+            continue
+        source_row = con.execute("SELECT * FROM sources WHERE id=?", (source_id(source),)).fetchone()
+        if source_row:
+            extract_result = extract_source(
+                con,
+                output_root=output_root,
+                row=source_row,
+                languages=languages,
+                whisper_language=args.whisper_language,
+                whisper_model=args.whisper_model,
+                frame_every_seconds=args.frame_every_seconds,
+                min_confidence=args.min_confidence,
+                dedupe_threshold=args.dedupe_threshold,
+                use_scene_detect=not args.no_scene_detect,
+                force=args.force,
+            )
+            refreshed = con.execute("SELECT * FROM sources WHERE id=?", (source_id(source),)).fetchone()
+            if refreshed and extract_result.get("status") != "failed":
+                normalize_source(con, output_root=output_root, row=refreshed, force=args.force)
+        refreshed_piece = con.execute("SELECT * FROM pieces WHERE id=?", (piece_id,)).fetchone()
+        associate_piece(
+            con,
+            piece_id=piece_id,
+            profile_id=profile_id,
+            run_id=run_id,
+            canonical_url=normalize_url(source),
+            media_type=(refreshed_piece or piece)["format"],
+            platform_content_id=platform_content_id(source),
+        )
+        _tag_source_failures(
+            con,
+            source=source,
+            profile_id=profile_id,
+            run_id=run_id,
+            piece_id=piece_id,
+        )
+
+
+def _analysis_profile_urls(args: argparse.Namespace) -> list[str]:
+    profiles: list[str] = []
+    for source in args.sources:
+        intake = link_intake(source)
+        if intake.get("kind") == "website":
+            if not args.all:
+                print_summary(intake)
+                continue
+            profiles.extend(item["url"] for item in intake.get("profiles") or [])
+        elif intake.get("kind") == "social_profile":
+            profiles.append(intake["url"])
+        else:
+            raise ValueError(f"analyze-profile requires a profile URL, not a content URL: {source}")
+    return list(dict.fromkeys(profiles))
+
+
+def _inventory_row_profile_error(
+    row: dict[str, str],
+    profile: dict[str, str],
+    *,
+    allow_unverified: bool,
+) -> str | None:
+    normalized = canonicalize_row(row)
+    row_platform = str(first_present(normalized, "platform") or platform_for_source(
+        str(first_present(normalized, "source_url", "url") or "")
+    )).casefold()
+    if row_platform not in {"unknown", profile["platform"]}:
+        return f"row platform {row_platform!r} does not match profile platform {profile['platform']!r}"
+
+    supplied_profile_url = first_present(normalized, "profile_url")
+    if supplied_profile_url:
+        try:
+            supplied = profile_identity(str(supplied_profile_url))
+        except ValueError:
+            return "row profile_url is invalid"
+        if supplied["id"] != profile["id"]:
+            return f"row profile_url belongs to {supplied['handle']!r}, not {profile['handle']!r}"
+        return None
+
+    creator = first_present(normalized, "creator", "account", "author", "handle")
+    if creator:
+        creator_text = str(creator).strip().casefold().lstrip("@").rstrip("/")
+        if is_url(creator_text):
+            try:
+                creator_text = profile_identity(creator_text)["handle"]
+            except ValueError:
+                return "row creator URL is invalid"
+        expected = profile["handle"].casefold().lstrip("@").rstrip("/")
+        if creator_text not in {expected, expected.rsplit("/", 1)[-1]}:
+            return f"row creator {creator!r} does not match profile handle {profile['handle']!r}"
+        return None
+
+    if not allow_unverified:
+        return "row has no creator or profile_url; pass --allow-unverified-inventory to attach it explicitly"
+    return None
+
+
+def cmd_analyze_profile(args: argparse.Namespace) -> int:
+    for name in ("posts", "top", "deep_limit", "minimum_sample", "bootstrap_iterations"):
+        if getattr(args, name) < 1:
+            print(f"--{name.replace('_', '-')} must be at least 1", file=sys.stderr)
+            return 2
+    if args.top > args.posts:
+        print("--top cannot be greater than --posts", file=sys.stderr)
+        return 2
+    try:
+        profile_urls = _analysis_profile_urls(args)
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    if not profile_urls:
+        return 0
+    if args.semantic_provider == "ollama":
+        semantic_analyzer = OllamaSemanticAnalyzer(
+            model_name=args.ollama_model,
+            endpoint=args.ollama_endpoint,
+        )
+    else:
+        semantic_analyzer = RuleBasedSemanticAnalyzer()
+
+    base_root = args.output_root.resolve()
+    multi = len(profile_urls) > 1
+    successful = 0
+    for profile_url in profile_urls:
+        identity = profile_identity(profile_url)
+        safe_handle = re.sub(r"[^a-z0-9._-]+", "-", identity["handle"]).strip("-") or "profile"
+        output_root = base_root / f"{identity['platform']}-{safe_handle}" if multi else base_root
+        con = connect(output_root)
+        profile = upsert_profile(con, profile_url)
+        config = {
+            "posts": args.posts,
+            "goal": args.goal,
+            "top": args.top,
+            "mode": args.mode,
+            "evidence_mode": args.evidence_mode,
+            "semantic_provider": args.semantic_provider,
+            "allow_unverified_inventory": args.allow_unverified_inventory,
+            "minimum_sample": args.minimum_sample,
+            "bootstrap_iterations": args.bootstrap_iterations,
+            "seed": args.seed,
+        }
+        run_id = start_profile_run(
+            con,
+            profile_id=profile["id"],
+            mode=args.mode,
+            evidence_mode=args.evidence_mode,
+            requested_posts=args.posts,
+            objective=args.goal,
+            top_k=args.top,
+            config=config,
+        )
+        inventory_rows: list[dict[str, str]] = []
+        if args.inventory_input:
+            for path in args.inventory_input:
+                inventory_rows.extend(read_metric_rows(path))
+            verified_rows: list[dict[str, str]] = []
+            for candidate in inventory_rows:
+                mismatch = _inventory_row_profile_error(
+                    candidate,
+                    profile,
+                    allow_unverified=args.allow_unverified_inventory,
+                )
+                if mismatch:
+                    source = first_present(candidate, "source_url", "url") or profile_url
+                    record_failure(
+                        con,
+                        source_id_=source_id(source),
+                        source_url=source,
+                        stage="inventory-profile-validation",
+                        message=mismatch,
+                        profile_id=profile["id"],
+                        run_id=run_id,
+                    )
+                    continue
+                verified_rows.append(candidate)
+            inventory_rows = verified_rows[: args.posts]
+        else:
+            urls, error = yt_dlp_flat_entries(profile_url, args.cookies, limit=args.posts)
+            if error:
+                record_failure(
+                    con,
+                    source_id_=source_id(profile_url),
+                    source_url=profile_url,
+                    stage="inventory",
+                    message=error,
+                    profile_id=profile["id"],
+                    run_id=run_id,
+                )
+            for url in urls[: args.posts]:
+                metadata, metadata_error = yt_dlp_metadata(url, args.cookies)
+                if metadata_error or not metadata:
+                    record_failure(
+                        con,
+                        source_id_=source_id(url),
+                        source_url=url,
+                        stage="inventory-metadata",
+                        message=metadata_error or "metadata unavailable",
+                        profile_id=profile["id"],
+                        run_id=run_id,
+                    )
+                    continue
+                inventory_rows.append(
+                    metric_row_from_metadata(
+                        url,
+                        metadata,
+                        platform=profile["platform"],
+                        metric_source="profile_inventory_yt_dlp",
+                    )
+                )
+                if args.delay:
+                    time.sleep(args.delay)
+
+        for inventory_position, inventory_row in enumerate(inventory_rows, start=1):
+            try:
+                result = import_metric_row(con, output_root=output_root, row=inventory_row)
+                if result.get("status") != "done":
+                    continue
+                piece = con.execute("SELECT * FROM pieces WHERE id=?", (result["id"],)).fetchone()
+                associate_piece(
+                    con,
+                    piece_id=result["id"],
+                    profile_id=profile["id"],
+                    run_id=run_id,
+                    canonical_url=normalize_url(result["source"]) if is_url(result["source"]) else result["source"],
+                    media_type=piece["format"] if piece else None,
+                    platform_content_id=platform_content_id(result["source"]),
+                    inventory_position=inventory_position,
+                )
+            except Exception as exc:
+                source = first_present(inventory_row, "source_url", "url") or profile_url
+                record_failure(
+                    con,
+                    source_id_=source_id(source),
+                    source_url=source,
+                    stage="inventory-import",
+                    message=str(exc),
+                    profile_id=profile["id"],
+                    run_id=run_id,
+                )
+
+        try:
+            if args.mode == "deep":
+                if args.deep_all:
+                    deep_ids = [
+                        row[0]
+                        for row in con.execute(
+                            """
+                            SELECT p.id FROM profile_run_pieces membership
+                            JOIN pieces p ON p.id=membership.piece_id
+                            WHERE p.profile_id=? AND membership.profile_run_id=?
+                            ORDER BY COALESCE(membership.inventory_position, 2147483647), p.published_at DESC, p.id
+                            """,
+                            (profile["id"], run_id),
+                        ).fetchall()
+                    ]
+                else:
+                    deep_ids = _deep_cohort_ids(
+                        con,
+                        profile_id=profile["id"],
+                        run_id=run_id,
+                        objective=args.goal,
+                        top_k=args.top,
+                        limit=args.deep_limit,
+                    )
+                _deep_process_profile(
+                    con,
+                    output_root=output_root,
+                    profile_id=profile["id"],
+                    run_id=run_id,
+                    piece_ids=deep_ids,
+                    args=args,
+                )
+            report, analysis = build_profile_report(
+                con,
+                profile_id=profile["id"],
+                profile_run_id=run_id,
+                objective=args.goal,
+                top_k=args.top,
+                semantic_analyzer=semantic_analyzer,
+                minimum_sample=args.minimum_sample,
+                bootstrap_iterations=args.bootstrap_iterations,
+                seed=args.seed,
+            )
+            coverage = report["coverage"]
+            finish_profile_run(con, run_id, status="done", coverage=coverage)
+            finished_run = con.execute(
+                "SELECT * FROM profile_runs WHERE id=?",
+                (run_id,),
+            ).fetchone()
+            if finished_run:
+                report["run"] = dict(finished_run)
+                report["run"]["config_json"] = json_loads(report["run"].get("config_json"))
+                report["run"]["coverage_json"] = json_loads(report["run"].get("coverage_json"))
+            paths = write_profile_report(report, output_root)
+            print_summary({
+                "status": "done",
+                "profile": profile,
+                "run_id": run_id,
+                "analysis_id": analysis["analysis_id"],
+                "coverage": coverage,
+                "outputs": {key: str(path) for key, path in paths.items()},
+            })
+            successful += 1
+        except Exception as exc:
+            coverage = {
+                "inventoried_posts": con.execute(
+                    """
+                    SELECT COUNT(*) FROM profile_run_pieces membership
+                    JOIN pieces p ON p.id=membership.piece_id
+                    WHERE p.profile_id=? AND membership.profile_run_id=?
+                    """,
+                    (profile["id"], run_id),
+                ).fetchone()[0],
+                "error": str(exc),
+            }
+            finish_profile_run(con, run_id, status="failed", coverage=coverage)
+            record_failure(
+                con,
+                source_id_=source_id(profile_url),
+                source_url=profile_url,
+                stage="analyze-profile",
+                message=str(exc),
+                profile_id=profile["id"],
+                run_id=run_id,
+            )
+            print_summary({"status": "failed", "profile": profile_url, "run_id": run_id, "error": str(exc)})
+    return 0 if successful == len(profile_urls) else 1
+
+
 def cmd_metric_template(args: argparse.Namespace) -> int:
     try:
         sys.stdout.write(metric_template(args.platform, include_example=not args.header_only))
@@ -2366,8 +3129,12 @@ def add_extract_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--no-scene-detect", action="store_true")
 
 
-def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="content-reference")
+def parse_args(
+    argv: list[str],
+    *,
+    prog: str = "content-reference",
+) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog=prog)
     sub = parser.add_subparsers(dest="command", required=True)
 
     collect = sub.add_parser("collect", help="Stage 1: download raw media and metadata.")
@@ -2456,6 +3223,42 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     analyze.add_argument("--limit", type=int, default=10)
     analyze.set_defaults(func=cmd_analyze)
 
+    analyze_profile = sub.add_parser(
+        "analyze-profile",
+        help="Inventory one or more profiles and explain which content properties are associated with performance.",
+    )
+    add_common(analyze_profile)
+    analyze_profile.add_argument("sources", nargs="+", help="Direct social profile URLs, or a website with --all.")
+    analyze_profile.add_argument("--all", action="store_true", help="Analyze every social profile discovered on a website.")
+    analyze_profile.add_argument("--posts", type=int, default=50, help="Maximum recent posts to inventory per profile.")
+    analyze_profile.add_argument("--goal", default="views", help="Exact objective metric to rank, e.g. views, reach, shares, saves, or retention_rate.")
+    analyze_profile.add_argument("--top", type=int, default=10, help="Size of the winning cohort.")
+    analyze_profile.add_argument("--mode", choices=["quick", "deep"], default="quick")
+    analyze_profile.add_argument("--evidence-mode", choices=["public", "owned", "local"], default="public")
+    analyze_profile.add_argument(
+        "--inventory-input",
+        type=Path,
+        action="append",
+        help="Offline/owned metrics CSV. When supplied, skip public profile inventory and analyze these rows.",
+    )
+    analyze_profile.add_argument(
+        "--allow-unverified-inventory",
+        action="store_true",
+        help="Explicitly attach CSV rows lacking creator/profile_url fields to this profile.",
+    )
+    analyze_profile.add_argument("--cookies", type=Path, help="Optional explicit cookies.txt. Browser cookies are never auto-extracted.")
+    analyze_profile.add_argument("--delay", type=float, default=2.0)
+    analyze_profile.add_argument("--deep-limit", type=int, default=30, help="Maximum winners plus matched/stratified controls to deep-process.")
+    analyze_profile.add_argument("--deep-all", action="store_true", help="Deep-process every inventoried post.")
+    analyze_profile.add_argument("--minimum-sample", type=int, default=5)
+    analyze_profile.add_argument("--bootstrap-iterations", type=int, default=1000)
+    analyze_profile.add_argument("--seed", type=int, default=0)
+    analyze_profile.add_argument("--semantic-provider", choices=["rules", "ollama"], default="rules")
+    analyze_profile.add_argument("--ollama-model", default="llama3.2")
+    analyze_profile.add_argument("--ollama-endpoint", default="http://127.0.0.1:11434/api/generate")
+    add_extract_args(analyze_profile)
+    analyze_profile.set_defaults(func=cmd_analyze_profile)
+
     template = sub.add_parser("metric-template", help="Print a platform-specific manual metrics CSV template.")
     template.add_argument("platform", help="x, linkedin, tiktok, instagram, youtube.")
     template.add_argument("--header-only", action="store_true")
@@ -2472,5 +3275,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> None:
-    args = parse_args(argv or sys.argv[1:])
+    prog = Path(sys.argv[0]).name if argv is None else "content-reference"
+    args = parse_args(argv or sys.argv[1:], prog=prog)
     raise SystemExit(args.func(args))

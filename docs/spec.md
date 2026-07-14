@@ -1,338 +1,215 @@
-# Spec: Short-Form Content Analysis Pipeline for Writing Guidelines
+# Statool Profile Intelligence Specification
 
-## 1. Objective
+This document describes the implemented product contract. The detailed requirement
+matrix and rollout rationale live in
+[`profile-intelligence-plan.md`](profile-intelligence-plan.md).
 
-Given Instagram links (reels and carousels) and TikTok links (videos), build a
-structured corpus of examples that can later be used to generate writing
-guidelines: voice, hooks, script structure, CTAs, and secondarily design cues.
+## 1. Product outcome
 
-Primary niche: astrology in Spanish for LATAM/Argentina.
+Given one or more social profile URLs, Statool inventories recent content, selects one
+exact performance objective, identifies a winning cohort, compares it with the
+profile's eligible baseline and matched controls, and explains the observable
+properties associated with stronger performance.
 
-Hard constraint: open-source tools only. No paid vision APIs and no paid models
-for extraction.
+The initial complete surface is Instagram Reels and carousels. Existing TikTok,
+YouTube, X, LinkedIn, Facebook, Threads, and local-file connectors remain available.
 
-## 2. Scope
+Statool reports associations, not causation. Every finding carries its comparison,
+effect, sample, confidence, limitation, and evidence references.
 
-In scope:
+## 2. Primary command
 
-- Download video, carousel images, captions, and available metrics.
-- Import manually exported platform metrics from CSV.
-- Transcribe spoken audio.
-- Extract on-screen video text: overlays, title cards, burned-in subtitles.
-- Extract text from each carousel slide.
-- Normalize all examples to a common queryable schema.
+```bash
+statool analyze-profile PROFILE_URL \
+  --posts 100 \
+  --goal views \
+  --top 10 \
+  --mode quick \
+  --output-root references/profile
+```
 
-Out of scope:
+`content-reference` remains an executable alias for compatibility.
 
-- Generating guidelines. A later LLM reads the prepared corpus.
-- Advanced visual design analysis. Optional minimal cues only.
+Multiple direct profiles are accepted. A website URL requires `--all` before its
+discovered social profiles are analyzed.
 
-## 3. Inputs
+### Quick mode
 
-TXT or CSV. CSV columns:
+- Inventory recent post URLs and available metadata/metrics.
+- Preserve captions, formats, publication dates, and durations.
+- Enforce exact-objective eligibility.
+- Compute caption and metadata features for the full eligible corpus.
+- Label topic/style with the selected local semantic provider.
+- Generate the report bundle with explicit missing transcript/OCR coverage.
 
-- `url` required.
-- `format_hint`: `reel | tiktok | carousel`, optional.
-- `notes`: operator note explaining why the example was selected.
+### Deep mode
 
-Local media paths are also valid for manually exported screenshots/videos.
+- Run quick inventory first.
+- Select winners plus format/publication-window controls by default.
+- Download and extract only that cohort, up to `--deep-limit`.
+- Use `--deep-all` to process the full inventory explicitly.
+- Produce word-timed transcripts, OCR blocks, and visual-cadence evidence.
+- Resume completed collect/extract/normalize work on later runs.
 
-Link-first intake:
+## 3. Evidence modes
 
-- `link-intake <url>` classifies the shared link.
-- If the URL is a social profile, it returns the platform and suggested
-  `research-link` command.
-- If the URL is social content, it returns the platform and suggested metric
-  command.
-- If the URL is a website, it fetches the page, finds social profile links, and
-  returns: `I found these profiles [...], would you like to run
-  content-analysis on all of them?`
-- `research-link <website> --all` runs content analysis on all discovered
-  profiles after confirmation.
-- `research-link <social-profile>` expands recent profile URLs with
-  `yt-dlp --flat-playlist` when supported, then imports best-effort metadata.
+| Mode | Intended source | Evidence contract |
+| --- | --- | --- |
+| `public` | Competitor/public profile | Public metadata and metrics available to local connectors |
+| `owned` | User-controlled account | API/export insights, including private metrics when provided |
+| `local` | Supplied files/screenshots/exports | Only operator-supplied media, text, and metrics |
 
-Manual metric CSVs are also valid through `import-metrics`. Supported columns
-include:
+An owned/local CSV can be analyzed without profile scraping:
 
-- `url` or `source_url`, required.
-- `platform`, optional when the URL is recognizable.
-- `format` or `format_hint`, optional.
-- `views`, `impressions`, `reach`, `plays`.
-- `likes`, `reactions`, `comments`, `replies`, `shares`, `reposts`.
-- `saves`, `bookmarks`, `clicks`, `profile_clicks`.
-- `avg_watch_time`, `watched_full_video_pct`, `completion_rate`,
-  `retention_rate`, `engagement_rate`.
-- `primary_metric_name`, `primary_metric_value` for explicit overrides.
-- `metric_source`, `metrics_captured_at`, `notes`.
-- `hook_onscreen`, `hook_spoken`, `cta_spoken` for manual creative analysis.
+```bash
+statool analyze-profile PROFILE_URL \
+  --inventory-input analytics.csv \
+  --evidence-mode owned \
+  --goal shares
+```
 
-Common export headers are normalized to these names. Examples:
+Statool never invents unavailable reach, retention, shares, saves, or completion data.
 
-- `Post URL`, `Permalink`, `Link` -> `url`
-- `Average Percentage Watched`, `Avg % Watched` -> `retention_rate`
-- `Watched Full Video`, `Full Video Watch Rate` -> `watched_full_video_pct`
-- `Share Count`, `Reposts`, `Retweets` -> `shares` or `reposts`
-- `Visual Hook`, `On Screen Hook` -> `hook_onscreen`
-- `Spoken CTA`, `CTA` -> `cta_spoken`
+## 4. Objective and cohort contract
 
-`metric-template <platform>` prints a CSV header plus example row for supported
-manual metric platforms.
+- Rank exactly one user-selected objective.
+- Require metric name, numeric value, basis, unit, source, and capture time.
+- Select one comparable metric signature; exclude unit/basis mismatches visibly.
+- Never substitute interaction count for retention or mix counts with ratios.
+- Keep the latest snapshot per post/signature for a run while retaining history.
+- Winners are top `k`; baseline is the eligible profile corpus.
+- Controls match format and publication-age band when samples support it.
+- Categorical results report winner/corpus prevalence and enrichment.
+- Continuous results use profile-derived quantile bands and matched median lift.
+- Bootstrap intervals are deterministic for a configured seed.
+- Groups below the minimum sample emit `insufficient_evidence`.
 
-## 4. OSS Stack
+Confidence labels describe evidence strength, never causal certainty.
 
-- `yt-dlp`: video and metadata for reels/TikToks.
-- `gallery-dl`: Instagram carousel images and metadata.
-- `ffmpeg`: audio extraction and frame sampling.
-- `faster-whisper`: multilingual timestamped transcription.
-- `PySceneDetect`: smart video frame timestamps.
-- `EasyOCR`: OCR for frames and slides, languages `es`, `pt`, `en`.
-- `rapidfuzz`: fuzzy deduplication of repeated on-screen text.
-- `SQLite`: corpus storage.
+## 5. Feature contract
 
-Fallbacks:
+### Common writing
 
-- `whisper` CLI when `faster-whisper` is unavailable.
-- `tesseract` when `EasyOCR` is unavailable.
-- fixed-interval frame sampling when `PySceneDetect` is unavailable.
+Caption, transcript, on-screen, and slide sources remain separate. Deterministic
+measurements include words, characters, sentences, sentence length, lines,
+paragraphs, questions, exclamations, numbers, bullets, emojis, imperatives,
+first/second-person signals, certainty/hedging, lexical diversity, language, n-grams,
+and exact source spans.
 
-## 5. Architecture
+The report includes profile vocabulary and winner-versus-baseline enriched words and
+phrases with example post IDs and excerpts.
+
+### Reels
+
+- Word-level timestamps and segment-level transcript evidence.
+- Spoken word count, WPM, speech duration, and speech/video ratio.
+- First-phrase words and seconds.
+- Median word gap and pause counts at 300, 600, and 1,000 ms.
+- Longest uninterrupted spoken run.
+- On-screen text frequency/duration when timed evidence exists.
+- Scene changes per minute kept as visual cadence, not writing evidence.
+- Duration and rhythm comparisons across profile-derived bands.
+
+Segment boundaries are never presented as measured pauses.
+
+### Carousels
+
+- Exact ordered slide count.
+- OCR blocks with text, confidence, bounding box, and image dimensions when available.
+- Total/cover/final/per-slide words, median/max density, block count, bullets,
+  numbering, questions, headings, and caption/slide overlap.
+- Versioned cover, slide-role, progression, and CTA labels.
+- Per-slide evidence retained for report navigation.
+
+### Semantic labels
+
+The provider-independent analyzer returns structured, validated labels for topics,
+intent, hook archetype, narrative structure, CTA, tone, slide roles, and Reel
+structure. The default `rules` provider is deterministic and low-confidence. The
+`ollama` provider is restricted to a local HTTP endpoint and records model/prompt
+versions. Social content is delimited as untrusted data.
+
+## 6. Durable pipeline
+
+```text
+profile intake
+  -> profile + run record
+  -> inventory + metric snapshots
+  -> exact objective eligibility
+  -> winner/control selection
+  -> optional deep extraction
+  -> deterministic features
+  -> versioned semantic labels
+  -> winner/baseline/control comparisons
+  -> canonical report
+  -> Markdown + HTML + JSON
+```
+
+The legacy staged commands remain compatible:
 
 ```text
 collect -> extract -> normalize -> export
 ```
 
-Each stage reads disk/DB and writes disk/DB so stages can be rerun without
-repeating prior work. Idempotency is by source hash. Use `--force` to rerun.
+## 7. SQLite contract
 
-Folder layout:
+Additive numbered migrations create or evolve:
+
+- `profiles`
+- `profile_runs`
+- `pieces` profile/run/content/cadence fields
+- `metric_observations`
+- `text_artifacts`
+- `visual_text_blocks`
+- `piece_features`
+- `semantic_labels`
+- `analysis_runs`
+- `findings`
+- `finding_evidence`
+- run/profile/piece-aware `failures`
+
+Existing corpora migrate in place. Raw media stays local and is not embedded in report
+exports.
+
+## 8. Report contract
+
+`findings.json`, `report.md`, and `report.html` are rendered from the same validated
+object. Required sections are:
+
+1. Profile/run configuration.
+2. Coverage, metric signatures, capture range, and failures.
+3. Ranked winners.
+4. Format enrichment.
+5. Duration/density bands.
+6. Topics, intent, hooks, CTA, and tone.
+7. Writing and vocabulary fingerprint.
+8. Reel language/rhythm/pauses/cadence.
+9. Carousel anatomy and slide patterns.
+10. What to repeat and test.
+11. What cannot be concluded.
+12. Evidence appendix.
+
+HTML escapes all untrusted text and activates only validated HTTP(S) links.
+
+## 9. Authentication and trust
+
+- Cookies are accepted only through an explicit `--cookies` path.
+- Browser cookie stores are never inspected.
+- Token/cookie contents are never written to SQLite, reports, or failures.
+- API credentials remain environment variables or CLI inputs for the existing fetchers.
+- Captions, transcripts, OCR, and comments are data, never executable/model instructions.
+
+## 10. Outputs
 
 ```text
-references/
-  raw/<url_hash>/        video, audio, frames, slides, raw metadata
-  processed/<url_hash>/  transcript.json, onscreen.json, slides.json
+output-root/
   corpus.sqlite
-  corpus.jsonl
+  findings.json
+  report.md
+  report.html
+  raw/         # deep/local only
+  processed/   # deep/local only
 ```
 
-## 6. Stage 1: Collect
-
-For each URL:
-
-- Detect platform and format from URL plus optional `format_hint`.
-- Video: run `yt-dlp -J` for metadata, then download raw media.
-- Carousel: run `gallery-dl` to download ordered images, caption, metadata.
-- Store creator, handle, publication date, duration, caption, and metrics when
-  present. Missing values remain null.
-- Auth: support explicit `cookies.txt`; do not require auth.
-- Delay between downloads, default 4 seconds.
-
-## 7. Stage 2: Extract
-
-For videos:
-
-- Extract 16kHz mono WAV with `ffmpeg`.
-- Transcribe with timestamped segments.
-- Detect scene/title-card changes with PySceneDetect. Fallback to fixed sampling.
-- Extract frames with `ffmpeg`.
-- OCR each frame. With EasyOCR, requested languages (`es,pt,en`) are used
-  directly. With the tesseract fallback, requested languages are mapped to
-  installed tesseract packs (`es->spa`, `pt->por`, `en->eng`) and per-line
-  confidence is read from tesseract TSV output. Install packs with
-  `brew install tesseract-lang`; EasyOCR remains the higher-accuracy path for
-  stylized overlays.
-- Deduplicate near-identical consecutive frame text with rapidfuzz threshold
-  around 85.
-- Drop low-confidence OCR rows, default threshold 0.4.
-
-For carousels:
-
-- OCR each image.
-- Preserve `slide_index`, with slide 1 treated as cover/hook.
-- Keep caption separate from slide text.
-
-## 8. Stage 3: Normalize
-
-Create one `pieces` row per source.
-
-Derived fields:
-
-- `hook_spoken`: transcript text from first 3 seconds.
-- `hook_onscreen`: first on-screen text card or carousel slide 1.
-- `cta_spoken`: final transcript segment.
-- `duration_bucket`: `short <=30s`, `mid 30-60s`, `long >60s`, or `carousel`.
-- `interaction_count`: sum of available `likes`, `comments`, `shares`. Real
-  counts only, never an estimate. Null when none are present.
-- `engagement_rate`: `(likes + comments + shares) / views` when views exist.
-- `engagement_basis`: `views` when `engagement_rate` is computed, `interactions`
-  when only raw counts exist (e.g. Instagram, which never exposes views via
-  yt-dlp), else null. A later LLM weights by `engagement_rate` when present and
-  falls back to `interaction_count`.
-
-No qualitative interpretation is done here. Hook type, tone, astrology topic,
-and CTA style are left for a later LLM.
-
-## 9. Stage 4: Export
-
-Export `pieces` to `corpus.jsonl`, one object per line.
-
-## 9.1 Manual Metrics Import
-
-`import-metrics` writes or updates `pieces` rows directly from platform exports.
-This allows Statool to track X/Twitter, LinkedIn, TikTok, Instagram, YouTube, or
-other platform performance before full media collection exists for each
-platform.
-
-`metric-template` supports `x`, `twitter`, `linkedin`, `tiktok`, `instagram`,
-and `youtube`.
-
-Primary platform metric defaults:
-
-```text
-X/Twitter       comments/replies
-LinkedIn        engagement_rate
-TikTok          completion_rate or watched_full_video_pct
-Instagram       retention_rate
-```
-
-If the primary metric is unavailable, Statool falls back to derived
-`engagement_rate` when possible, then `interaction_count`.
-
-## 9.1.1 Authenticated Metrics Fetch
-
-`fetch-metrics` imports metrics from authenticated platform APIs and then writes
-through the same normalization path as `import-metrics`.
-
-Supported API fetchers:
-
-- YouTube: `--platform youtube`, using `--api-key` or `YOUTUBE_API_KEY`.
-  Fetches `videos.list` statistics/snippet/contentDetails for a video or Shorts
-  URL.
-- X/Twitter: `--platform x`, using `--bearer-token` or `X_BEARER_TOKEN`.
-  Fetches post lookup fields and public metrics.
-- LinkedIn: `--platform linkedin`, using `--access-token` or
-  `LINKEDIN_ACCESS_TOKEN`. Fetches `socialActions` aggregate counts for an
-  activity URN.
-- Instagram/Facebook/Threads: `--platform instagram|facebook|threads`, using
-  `--access-token` or `META_ACCESS_TOKEN`. Fetches Graph API insights for an
-  explicit object/media ID. Public URLs are rejected because they do not
-  reliably contain the API object ID.
-
-The CLI does not store tokens, does not auto-extract browser cookies, and logs
-per-source API failures to `failures`.
-
-## 9.1.2 Connector Modes
-
-`connector-options` and `setup-connector` expose the acquisition choices per
-platform:
-
-- `api`: official authenticated API, best quality, requires tokens or API keys.
-- `export`: platform analytics CSV export, stable and low risk.
-- `scrape`: public metadata extraction through local tools, best-effort and
-  fragile.
-- `manual`: generated template filled by the operator.
-
-`scrape-metrics` is deliberately separate from `fetch-metrics`. It uses
-`yt-dlp` metadata and optional explicit `--cookies cookies.txt`; it does not
-auto-extract browser cookies. Scraped rows use `metric_source=scrape_yt_dlp`.
-
-## 9.2 Metrics Report
-
-`report` ranks normalized rows by the most actionable available signal:
-
-1. `primary_metric_value`.
-2. `engagement_rate`.
-3. `interaction_count`.
-
-It emits one JSON object with the ranked items, optional platform filter, row
-counts, and the metric basis used for each piece.
-
-## 9.3 Coverage Report
-
-`coverage` summarizes the current corpus by platform. It reports row counts,
-formats, metric sources, rows with any primary metric, rows with native primary
-metrics, and rows still missing a primary metric. Use this to keep the README
-coverage table aligned with the actual data surface as new platforms are added.
-
-## 9.4 Creative Analytics
-
-`analyze` groups rows by:
-
-- `format`
-- `hook_onscreen`
-- `hook_spoken`
-- `cta_spoken`
-
-Each group is ranked by average primary metric, falling back to engagement rate
-or interaction count when no native primary metric exists. `--min-count` should
-be used to avoid over-reading single examples.
-
-## 10. SQLite Schema
-
-Table `pieces`:
-
-```text
-id                TEXT
-source_url        TEXT
-platform          TEXT
-format            TEXT
-creator           TEXT
-published_at      TEXT
-duration_sec      REAL
-duration_bucket   TEXT
-caption           TEXT
-transcript        JSON
-onscreen_text     JSON
-slides            JSON
-hook_spoken       TEXT
-hook_onscreen     TEXT
-cta_spoken        TEXT
-views             INTEGER
-likes             INTEGER
-comments          INTEGER
-shares            INTEGER
-interaction_count INTEGER
-engagement_rate   REAL
-engagement_basis  TEXT
-primary_metric_name TEXT
-primary_metric_value REAL
-primary_metric_basis TEXT
-secondary_metrics TEXT
-metric_source TEXT
-metric_confidence TEXT
-metrics_captured_at TEXT
-notes             TEXT
-collected_at      TEXT
-```
-
-Table `failures`:
-
-```text
-url/source id, stage, message, occurred_at
-```
-
-## 11. Later Guideline Generation
-
-A later LLM should read `corpus.jsonl` and produce:
-
-- `voice-reference.md`
-- `short-reel-guidelines.md`
-- `long-reel-guidelines.md`
-- `carousel-guidelines.md`
-- `ascendant-format-guidelines.md`
-
-When metrics exist, weight examples by engagement rate.
-
-## 12. Errors and Edge Cases
-
-- Missing metadata: store null, never estimate.
-- Auth/download failure: record failure and continue batch.
-- EasyOCR detects no text: empty list, not error.
-- Video without audio/speech: empty transcript, valid.
-- Single-slide carousel: valid.
-- Animated letter-by-letter text: fuzzy dedup should collapse repeated frames.
-
-## 13. Notes
-
-Downloading social content can violate platform terms. Use low scale, local
-analysis only, and do not redistribute raw media.
+The report remains useful when evidence is incomplete: unavailable channels appear as
+coverage/limitations and are never converted into measured zeroes.

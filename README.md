@@ -8,22 +8,116 @@ The core user flow is link-first: share a social profile or website URL, let
 Statool find the relevant social profiles/content, then choose whether to use
 official APIs, analytics exports, best-effort scraping, or manual metric input.
 
-The CLI command is `content-reference`. The tool prepares clean, queryable data
-that an LLM or later reporting layer can read; it does not generate final
-content guidelines itself.
+The preferred CLI command is `statool`; `content-reference` remains as a
+compatibility alias. Statool now produces evidence-backed profile reports as well
+as a clean, queryable corpus.
 
 ## What Is Statool?
 
-Statool is the product direction for this repository: a local, cross-platform
-social content analysis tool implemented today as the `content-reference` CLI.
-As the project expands, this README should be updated to reflect current
-platform coverage, metrics, and analysis features.
+Statool is a local, cross-platform social content intelligence tool. Its complete
+profile workflow is Instagram-first: inventory a profile, select one exact
+performance objective, compare winners with the profile baseline, measure how the
+creator writes/speaks/builds carousels, and render every conclusion with samples,
+confidence, limitations, and post evidence.
+
+## Analyze a profile
+
+Quick analysis uses profile metadata, captions, formats, dates, durations, and
+available metrics:
+
+```bash
+statool analyze-profile \
+  "https://www.instagram.com/example/" \
+  --posts 100 \
+  --goal views \
+  --top 10 \
+  --mode quick \
+  --output-root references/example
+```
+
+Deep analysis additionally downloads the winner cohort plus matched/stratified
+controls, then runs transcription, word timing, OCR blocks, and scene analysis:
+
+```bash
+statool analyze-profile \
+  "https://www.instagram.com/example/" \
+  --posts 100 \
+  --goal views \
+  --top 10 \
+  --mode deep \
+  --deep-limit 30 \
+  --cookies cookies.txt \
+  --output-root references/example
+```
+
+Use `--deep-all` only when every inventoried post should be downloaded and
+processed. Cookies are always explicit; Statool never reads browser cookies.
+
+The command writes:
+
+```text
+references/example/
+  corpus.sqlite       versioned profiles, runs, metrics, features, findings, evidence
+  findings.json       canonical machine-readable report
+  report.md           readable evidence-backed analysis
+  report.html         escaped, navigable report
+  raw/                local media cache (deep mode)
+  processed/          transcripts, OCR, frames (deep mode)
+```
+
+Each report covers:
+
+- exact-objective coverage and ranked winning posts;
+- winner versus eligible-profile format share and enrichment;
+- duration and density bands derived from the profile distribution;
+- topics, intent, hook archetype, CTA, narrative structure, and tone;
+- caption length, sentence length, questions, imperatives, pronouns, language,
+  lexical diversity, repeated words/phrases, and winner-enriched vocabulary;
+- Reel spoken words, WPM, first phrase, word gaps, measured pauses, speech ratio,
+  on-screen text, and visual cadence;
+- carousel slide count, ordered OCR blocks, cover/final slide, per-slide words,
+  density, bullets, numbering, questions, caption overlap, roles, and progression;
+- what to repeat, what to test, and what the evidence cannot establish.
+
+Findings are associative, not causal. Statool never blends `views` with
+`retention_rate`, counts with percentages, or one objective with a fallback signal
+inside a profile ranking.
+
+### Owned/local analytics export
+
+Public Instagram extraction is best-effort and may require cookies. Private reach,
+retention, saves, and shares must come from an owned-account API or export. An
+offline CSV also makes runs reproducible:
+
+```bash
+statool analyze-profile \
+  "https://www.instagram.com/example/" \
+  --inventory-input exports/instagram-posts.csv \
+  --evidence-mode owned \
+  --posts 100 \
+  --goal shares \
+  --mode quick \
+  --output-root references/example
+```
+
+The CSV uses the same flexible headers as `import-metrics`, including `Post URL`,
+`Views`, `Reach`, `Share Count`, `Save Count`, `Completion Rate`, and
+`Average Percentage Watched`. Include `creator`/`handle` or `profile_url` on
+each row so Statool can verify that the export belongs to the requested profile.
+For a deliberately pre-filtered file without either field, opt in explicitly with
+`--allow-unverified-inventory`.
+
+Metric comparability can be declared per column with fields such as
+`views_basis`, `views_unit`, and `views_denominator` (or the generic
+`metric_basis`, `metric_unit`, and `metric_denominator`). Statool preserves this
+signature and excludes incompatible observations instead of blending, for example,
+lifetime views with rolling-seven-day views.
 
 ## Platform Coverage
 
 | Plataforma | Formatos | Estado |
 | --- | --- | --- |
-| Instagram | Reels, carousels | Media cubierto; metricas via Graph API con media ID |
+| Instagram | Reels, carousels, posts estaticos | Media cubierto; metricas via Graph API con media ID |
 | TikTok | Videos | Cubierto |
 | Local files | Videos, audios, imagenes | Cubierto como fallback/manual |
 | X/Twitter | Posts | Metricas via API; media no cubierto |
@@ -59,6 +153,7 @@ also have a primary metric that reflects what the platform tends to reward.
 - Extrae texto en pantalla con EasyOCR o Tesseract.
 - Detecta frames por escenas o intervalos.
 - Hace OCR de slides de carousels.
+- Conserva timestamps por palabra y bloques OCR con coordenadas/confianza.
 - Normaliza a SQLite y JSONL.
 - Guarda caption, creator, fecha, duracion, transcript, texto en pantalla,
   texto de slides, hook hablado, hook visual y CTA hablado.
@@ -72,12 +167,24 @@ also have a primary metric that reflects what the platform tends to reward.
 - Genera reportes rankeados por metrica primaria, engagement rate o
   interacciones.
 - Analiza performance por formato, hook visual, hook hablado y CTA hablado.
+- Mantiene perfiles, corridas, snapshots historicos de metricas, artifacts de
+  texto, features versionados, labels semanticos, findings y evidencia.
+- Compara top-k con baseline y controles por formato/ventana temporal, calcula
+  enrichment, lift, percentiles, intervalos bootstrap y confidence labels.
+- Genera `report.md`, `report.html` y `findings.json` desde un solo objeto.
 - Registra fallas por URL sin cortar todo el batch.
 
 ## Pipeline
 
 ```text
 collect -> extract -> normalize -> export
+```
+
+The profile orchestration wraps that compatible pipeline with:
+
+```text
+inventory -> metric eligibility -> winner/control cohort -> deep extraction
+          -> deterministic features -> semantic labels -> comparisons -> report
 ```
 
 Each stage reads/writes disk plus SQLite, so stages can be rerun independently.
@@ -300,7 +407,18 @@ content-reference analyze \
 
 ## Data Model
 
-Normalized rows live in SQLite table `pieces` and export to JSONL with:
+Normalized rows still live in `pieces` and export to JSONL. Additive SQLite
+migrations also create:
+
+- `profiles` and `profile_runs`
+- `profile_run_pieces` (historical run membership and inventory snapshots)
+- `metric_observations` (historical snapshots; analysis source of truth)
+- `text_artifacts` and `visual_text_blocks`
+- `piece_features` and `semantic_labels`
+- `analysis_runs`, `findings`, and `finding_evidence`
+
+Existing `pieces` rows remain compatible and gain nullable profile/run fields.
+The corpus includes:
 
 - source URL and platform
 - format
