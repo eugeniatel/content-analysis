@@ -113,6 +113,41 @@ Metric comparability can be declared per column with fields such as
 signature and excludes incompatible observations instead of blending, for example,
 lifetime views with rolling-seven-day views.
 
+### GTM Instagram monitor ingest
+
+The MARA-567/MARA-1171 GTM monitor has a frozen Instagram watchlist at
+`data/gtm-instagram-watchlist.MARA-1171.json`. Run the read-only Business
+Discovery path in local-safe mode:
+
+```bash
+statool gtm-instagram-ingest \
+  --watchlist data/gtm-instagram-watchlist.MARA-1171.json \
+  --output-root references/gtm-instagram \
+  --dry-run
+```
+
+The command uses `META_ACCESS_TOKEN` plus a managed IG user id from
+`META_IG_USER_ID`, `META_INSTAGRAM_BUSINESS_ACCOUNT_ID`,
+`INSTAGRAM_BUSINESS_ACCOUNT_ID`, or `IG_BUSINESS_ACCOUNT_ID` unless explicit
+flags are supplied. It never stores token values, never reads personal cookies,
+and writes only local evidence/report artifacts:
+
+```text
+references/gtm-instagram/
+  corpus.sqlite
+  instagram/cursors/
+  instagram/raw/<handle>/
+  instagram/normalized/media.jsonl
+  instagram/reports/coverage.json
+  instagram/reports/daily-deltas.json
+  instagram/reports/signal-brief.json
+```
+
+Coverage includes every frozen watchlist row as `ingestable`, `blocked`, or
+`unsupported_or_unresolved`, with a separate `es_AR` section. Deltas are limited
+to observed topics, format, hook/caption, cadence, carousel child order, and
+public like/comment counts where the API exposes them.
+
 ## Platform Coverage
 
 | Plataforma | Formatos | Estado |

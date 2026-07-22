@@ -23,6 +23,7 @@ from urllib.request import Request, urlopen
 
 from .analytics import analyze_winners
 from .evidence import persist_piece_evidence
+from . import instagram_gtm
 from .migrations import run_migrations
 from .profile_pipeline import build_profile_report, write_profile_report
 from .profiles import (
@@ -190,6 +191,11 @@ CONNECTORS = {
     "instagram": {
         "modes": {
             "api": {"command": "fetch-metrics --platform instagram", "requires": ["META_ACCESS_TOKEN", "media ID"], "quality": "best"},
+            "business_discovery": {
+                "command": "gtm-instagram-ingest --watchlist watchlist.json",
+                "requires": ["META_ACCESS_TOKEN", "Instagram Business/Creator discovery IG user ID"],
+                "quality": "official_competitor_public",
+            },
             "scrape": {"command": "scrape-metrics --platform instagram", "requires": ["yt-dlp", "optional cookies.txt"], "quality": "best_effort"},
             "export": {"command": "import-metrics --input metrics.csv", "requires": ["Instagram insights export"], "quality": "good"},
             "manual": {"command": "metric-template instagram", "requires": [], "quality": "manual"},
@@ -3105,6 +3111,179 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _meta_ig_user_id_from_env() -> str | None:
+    for name in (
+        "META_IG_USER_ID",
+        "META_INSTAGRAM_BUSINESS_ACCOUNT_ID",
+        "INSTAGRAM_BUSINESS_ACCOUNT_ID",
+        "IG_BUSINESS_ACCOUNT_ID",
+    ):
+        value = os.environ.get(name)
+        if value:
+            return value
+    return None
+
+
+def _slides_from_instagram_media(media: dict[str, Any]) -> list[dict[str, Any]] | None:
+    children = media.get("children") or []
+    if not children:
+        return None
+    return [
+        {
+            "slide_index": child.get("slide_index"),
+            "text": "",
+            "media_id": child.get("media_id"),
+            "media_type": child.get("media_type"),
+            "permalink": child.get("permalink"),
+            "confidence": None,
+            "missing_field_reasons": child.get("missing_field_reasons") or [],
+        }
+        for child in children
+    ]
+
+
+def _persist_instagram_gtm_media(
+    con: sqlite3.Connection,
+    *,
+    output_root: Path,
+    media: dict[str, Any],
+    run_ids: dict[str, str],
+    profile_ids: dict[str, str],
+    position_by_profile: dict[str, int],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    profile_key_ = str(media["profile_key"])
+    handle = str(media.get("instagram_handle") or "")
+    profile_url = str((media.get("provenance") or {}).get("profile_url") or f"https://www.instagram.com/{handle}/")
+    if profile_key_ not in profile_ids:
+        profile = upsert_profile(
+            con,
+            profile_url,
+            display_name=str(media.get("entity") or handle or ""),
+            primary_language=str(media.get("language") or ""),
+        )
+        profile_ids[profile_key_] = profile["id"]
+        run_ids[profile_key_] = start_profile_run(
+            con,
+            profile_id=profile["id"],
+            mode="quick",
+            evidence_mode="public",
+            requested_posts=args.limit,
+            objective=args.goal,
+            top_k=min(args.top, args.limit),
+            config={
+                "command": "gtm-instagram-ingest",
+                "watchlist": str(args.watchlist),
+                "graph_version": args.graph_version,
+                "limit": args.limit,
+                "dry_run": args.dry_run,
+                "source_version": instagram_gtm.SOURCE_VERSION,
+            },
+        )
+
+    row = instagram_gtm.metric_row_from_media(media)
+    result = import_metric_row(con, output_root=output_root, row=row)
+    if result.get("status") != "done":
+        return result
+
+    slides = _slides_from_instagram_media(media)
+    con.execute(
+        """
+        UPDATE pieces
+        SET slides=COALESCE(?, slides),
+            media_type=?,
+            platform_content_id=?,
+            canonical_url=?
+        WHERE id=?
+        """,
+        (
+            json_dumps(slides) if slides else None,
+            media.get("format"),
+            media.get("media_id"),
+            media.get("canonical_permalink") or row["url"],
+            result["id"],
+        ),
+    )
+    con.commit()
+    persist_piece_evidence(
+        con,
+        piece_id=result["id"],
+        caption=str(media.get("caption") or ""),
+        extracted={"format": media.get("format"), "slides": slides or []},
+        source_path=str(media.get("raw_evidence_path") or ""),
+        language=str(media.get("language") or "") or None,
+    )
+    position_by_profile[profile_key_] = position_by_profile.get(profile_key_, 0) + 1
+    associate_piece(
+        con,
+        piece_id=result["id"],
+        profile_id=profile_ids[profile_key_],
+        run_id=run_ids[profile_key_],
+        canonical_url=str(media.get("canonical_permalink") or row["url"]),
+        media_type=str(media.get("format") or ""),
+        platform_content_id=str(media.get("media_id") or ""),
+        inventory_position=position_by_profile[profile_key_],
+    )
+    return result
+
+
+def cmd_gtm_instagram_ingest(args: argparse.Namespace) -> int:
+    output_root = args.output_root.resolve()
+    watchlist = instagram_gtm.load_watchlist(args.watchlist)
+    access_token = args.access_token or os.environ.get("META_ACCESS_TOKEN")
+    ig_user_id = args.ig_user_id or _meta_ig_user_id_from_env()
+    result = instagram_gtm.run_watchlist_ingestion(
+        watchlist=watchlist,
+        output_root=output_root,
+        ig_user_id=ig_user_id,
+        access_token=access_token,
+        graph_version=args.graph_version,
+        limit=args.limit,
+        dry_run=args.dry_run,
+        http_get=http_get_json,
+        fixture_response_dir=args.fixture_response_dir,
+    )
+
+    con = connect(output_root)
+    run_ids: dict[str, str] = {}
+    profile_ids: dict[str, str] = {}
+    position_by_profile: dict[str, int] = {}
+    imported = 0
+    for media in result["new_media"]:
+        imported_result = _persist_instagram_gtm_media(
+            con,
+            output_root=output_root,
+            media=media,
+            run_ids=run_ids,
+            profile_ids=profile_ids,
+            position_by_profile=position_by_profile,
+            args=args,
+        )
+        if imported_result.get("status") == "done":
+            imported += 1
+
+    coverage_by_key = {row["profile_key"]: row for row in result["coverage"]["profiles"]}
+    for profile_key_, run_id in run_ids.items():
+        finish_profile_run(
+            con,
+            run_id,
+            status="done",
+            coverage=coverage_by_key.get(profile_key_, {}),
+        )
+
+    summary = {
+        "status": "done",
+        "watchlist_rows": len(watchlist),
+        "new_media": len(result["new_media"]),
+        "imported_rows": imported,
+        "coverage_summary": result["coverage"]["coverage_summary"],
+        "es_AR_coverage_summary": result["coverage"]["es_AR"]["coverage_summary"],
+        "outputs": result["outputs"],
+    }
+    print_summary(summary)
+    return 0
+
+
 def add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--force", action="store_true")
@@ -3203,7 +3382,7 @@ def parse_args(
 
     setup_connector_parser = sub.add_parser("setup-connector", help="Show setup steps for a platform acquisition mode.")
     setup_connector_parser.add_argument("platform")
-    setup_connector_parser.add_argument("--mode", required=True, choices=["api", "export", "scrape", "manual"])
+    setup_connector_parser.add_argument("--mode", required=True, choices=["api", "business_discovery", "export", "scrape", "manual"])
     setup_connector_parser.set_defaults(func=cmd_setup_connector)
 
     report = sub.add_parser("report", help="Rank pieces by platform-native metrics.")
@@ -3258,6 +3437,22 @@ def parse_args(
     analyze_profile.add_argument("--ollama-endpoint", default="http://127.0.0.1:11434/api/generate")
     add_extract_args(analyze_profile)
     analyze_profile.set_defaults(func=cmd_analyze_profile)
+
+    gtm_instagram = sub.add_parser(
+        "gtm-instagram-ingest",
+        help="Read-only Instagram Business Discovery ingestion for the GTM monitor watchlist.",
+    )
+    add_common(gtm_instagram)
+    gtm_instagram.add_argument("--watchlist", type=Path, required=True, help="Frozen MARA-567/MARA-1171 watchlist JSON.")
+    gtm_instagram.add_argument("--limit", type=int, default=25, help="Maximum media returned per profile.")
+    gtm_instagram.add_argument("--goal", default="comments", help="Profile-run objective used for imported evidence rows.")
+    gtm_instagram.add_argument("--top", type=int, default=5)
+    gtm_instagram.add_argument("--graph-version", default="v24.0")
+    gtm_instagram.add_argument("--ig-user-id", help="Instagram Business/Creator discovery IG user id. Defaults to managed Meta env.")
+    gtm_instagram.add_argument("--access-token", help="Meta access token. Defaults to META_ACCESS_TOKEN.")
+    gtm_instagram.add_argument("--dry-run", action="store_true", help="Write only local-safe evidence/report artifacts; no runtime scheduling.")
+    gtm_instagram.add_argument("--fixture-response-dir", type=Path, help="Local Business Discovery response fixtures keyed by handle.")
+    gtm_instagram.set_defaults(func=cmd_gtm_instagram_ingest)
 
     template = sub.add_parser("metric-template", help="Print a platform-specific manual metrics CSV template.")
     template.add_argument("platform", help="x, linkedin, tiktok, instagram, youtube.")
