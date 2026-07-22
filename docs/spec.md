@@ -33,6 +33,28 @@ statool analyze-profile PROFILE_URL \
 Multiple direct profiles are accepted. A website URL requires `--all` before its
 discovered social profiles are analyzed.
 
+### GTM monitor watchlist ingest
+
+`statool gtm-instagram-ingest` runs the MARA-567/MARA-1171 Instagram monitor
+watchlist through Instagram Business Discovery in a read-only local-safe mode.
+It accepts the frozen machine-readable watchlist, writes per-profile cursors,
+stores raw API evidence separately from normalized rows, imports new media into
+the shared corpus, and emits coverage, daily deltas, and a weekly Signal Brief
+contract.
+
+```bash
+statool gtm-instagram-ingest \
+  --watchlist data/gtm-instagram-watchlist.MARA-1171.json \
+  --output-root references/gtm-instagram \
+  --dry-run
+```
+
+The command uses managed Meta credentials from env or explicit flags. It does
+not print, persist, copy, or mutate tokens. Coverage names each profile as
+`ingestable`, `blocked`, or `unsupported_or_unresolved`, including a separate
+`es_AR` cohort section. Deltas never infer competitor reach, saves, retention,
+demographics, intent, or causal performance; they use only API-exposed evidence.
+
 ### Quick mode
 
 - Inventory recent post URLs and available metadata/metrics.
