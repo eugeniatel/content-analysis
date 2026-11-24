@@ -4,16 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "content-reference-toolkit"
-version = "0.2.0"
-description = "Local profile intelligence for evidence-backed social content analysis."
+version = "0.3.0"
+description = "Composable content research tools, Statool analytics and conversation-first research skills."
 requires-python = ">=3.11"
 dependencies = ["rapidfuzz>=3.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 extract = ["faster-whisper>=1.0", "easyocr>=1.7", "scenedetect>=0.6"]
+video = ["numpy", "scipy", "librosa", "opencv-python-headless", "imageio-ffmpeg", "matplotlib", "pillow", "pyloudnorm", "pytesseract", "soundfile", "certifi", "yt-dlp", "faster-whisper"]
 
 [project.scripts]
+content-analysis = "content_analysis.__main__:main"
 content-reference = "content_reference_toolkit.cli:main"
 statool = "content_reference_toolkit.cli:main"
 

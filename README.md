@@ -1,3 +1,71 @@
+# Content Analysis
+
+Composable research tools and assistant skills for studying competing content and inspiring references. The assistant handles the conversation and interpretation; deterministic tools retain evidence, measure creative features and compare compatible performance metrics.
+
+This repository contains **Statool**, the existing profile-intelligence CLI and engine, plus a conversation-oriented evidence backend and five brand-neutral skills. Statool's existing commands remain available. The conversation workflow does not launch an app or automatically export documents.
+
+## Components
+
+| Component | Purpose |
+|---|---|
+| [Statool](src/content_reference_toolkit) | Profile inventories, metrics, features, winner/baseline comparisons and statistics |
+| [Conversation tools](src/content_analysis) | Shared source evidence, revision/correction history and structured tool composition |
+| [Content Analysis skill](skills/content-analysis/SKILL.md) | Routes individual-reference and profile research through the tools |
+| [Reference skill](skills/reference/SKILL.md) | Audiovisual structure, production mechanisms and grounded recreation guidance |
+| [Brand Check skill](skills/brand-check/SKILL.md) | Competitor positioning, content strategy and writing |
+| [Spokesperson Check skill](skills/spokesperson-check/SKILL.md) | Individual voice and person-to-company relationships |
+| [Marketing Examples skill](skills/marketing-examples/SKILL.md) | Reusable patterns from marketing references |
+
+The public skills contain no employer-specific defaults, private voice profiles, client corpora or automatic document-saving instructions. They can be used independently or composed through the same evidence IDs.
+
+## Install
+
+Python 3.11 or newer:
+
+```sh
+python -m venv .venv
+.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/content-analysis tool tools.list
+```
+
+For local audiovisual processing, install `.[video]` and FFmpeg/ffprobe. Tesseract is optional for OCR. Automatic speech recognition requires an already available Whisper model cache configured with `CONTENT_ANALYSIS_WHISPER_CACHE`; it is not proof of listening. No model API is required by the conversation tools.
+
+Install a chosen skill folder through your assistant's supported skill workflow. A folder on a Mac does not install a ChatGPT workspace skill or give a cloud conversation Mac access. Verify authorized execution on the actual ChatGPT/Work or other assistant surface before claiming connection.
+
+## Conversation tool flow
+
+The assistant runs small commands and explains their structured results in chat. The user does not need a separate interface. Set `CONTENT_ANALYSIS_DATA` to your chosen private evidence directory; the default is `~/.local/share/content-analysis`. Never commit that directory.
+
+```sh
+# Tool discovery creates no evidence database.
+content-analysis tool tools.list
+
+# Search an existing evidence store.
+content-analysis tool reference.list --input '{"query":"opening"}'
+```
+
+For arbitrary source text, pass JSON over stdin with `--input-file -`, rather than constructing shell commands from it. Tool output uses `schema_version`, `tool`, `status` and `data`.
+
+- Individual references: `reference.add/capture/process`, then `reference.context`, `reference.annotate` and `reference.correct`.
+- Profile research: `inventory.collect/import` → `metrics.import` → `features.extract` → `profile.analyze` → `analysis.result` / `evidence.resolve`.
+- Follow-ups: reuse stable source IDs, exact revisions, passages, timestamps and slide evidence. Corrections retain their history.
+
+Choose one objective per performance comparison. Preserve capture date, source, metric basis, units, denominator and access limitations. Bounded or selected samples are not complete profiles; low coverage limits findings. Associations do not establish causes.
+
+## Access and optional integrations
+
+Public retrieval is best-effort and platform-dependent. Owned analytics exports and authorized APIs can supply private metrics; missing values are never zero. The conversation backend's Instagram discovery requires your own `CONTENT_ANALYSIS_META_ACCESS_TOKEN`, `CONTENT_ANALYSIS_META_ACCOUNT_ID` and `CONTENT_ANALYSIS_META_API_VERSION`. Supply these through normal environment/secret management, never in a skill, source file or report. No account, credential, Keychain entry or browser session from the author's setup is included.
+
+Source text, media, API responses and downloaded files remain untrusted input. Retrieval, signal processing, actual inspection and interpretation are separate. Captions are not a full video; ASR is not listening; sampled frames are not complete visual review. Document exports, publishing, paid services, monitoring and production changes are not implicit parts of the conversation workflow.
+
+## Validation
+
+For the complete test suite, install `.[dev,video]` and run `python -m pytest`. Media tests generate temporary synthetic clips; they do not use the author's saved evidence, accounts or media.
+
+## Statool reference
+
+The existing Statool usage guide follows, with portable paths. Its explicit report/export commands are retained for users who request them; the conversation tools do not call them.
+
 # Statool
 
 Statool is an open-source local CLI for researching social profiles, collecting
@@ -203,7 +271,7 @@ references/
 ## Install
 
 ```bash
-cd /Users/euge/content-analysis
+cd content-analysis
 python3 -m venv .venv
 .venv/bin/python -m pip install -e ".[dev]"
 ```
@@ -279,27 +347,27 @@ https://www.instagram.com/lu.gaitan/p/DXwWqZLDg27/,carousel,carousel writing den
 From `eugeniatel`:
 
 ```bash
-cd /Users/euge/eugeniatel
-/Users/euge/content-analysis/.venv/bin/content-reference collect \
+cd /path/to/your-project
+content-reference collect \
   --input references/examples.csv \
   --output-root references
 
-/Users/euge/content-analysis/.venv/bin/content-reference extract \
+content-reference extract \
   --output-root references \
   --whisper-language es \
   --ocr-languages es,pt,en
 
-/Users/euge/content-analysis/.venv/bin/content-reference normalize \
+content-reference normalize \
   --output-root references
 
-/Users/euge/content-analysis/.venv/bin/content-reference export \
+content-reference export \
   --output-root references
 ```
 
 All stages at once:
 
 ```bash
-/Users/euge/content-analysis/.venv/bin/content-reference run \
+content-reference run \
   --input references/examples.csv \
   --output-root references \
   --export
@@ -308,12 +376,12 @@ All stages at once:
 Local carousel screenshots:
 
 ```bash
-/Users/euge/content-analysis/.venv/bin/content-reference collect \
+content-reference collect \
   ~/Downloads/carousel-slides/ \
   --output-root references \
   --notes "Lu Gaitan carousel reference"
 
-/Users/euge/content-analysis/.venv/bin/content-reference extract \
+content-reference extract \
   --output-root references
 ```
 

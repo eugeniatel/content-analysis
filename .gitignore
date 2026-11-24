@@ -8,3 +8,20 @@ __pycache__/
 # Generated corpora/media + run artifacts. Outputs never live in this repo;
 # keep them local to the project being analyzed.
 references/
+
+# Private evidence, authentication and generated artifacts
+data/
+.env
+.env.*
+!.env.example
+cookies*.txt
+*.sqlite*
+*.mp4
+*.mov
+*.mp3
+*.wav
+*.m4a
+
+# Package/build outputs
+build/
+dist/
